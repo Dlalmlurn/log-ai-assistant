@@ -1,0 +1,20 @@
+filebeat.inputs:
+  - type: filestream
+    id: vpn-log-input
+    enabled: true
+    paths:
+      - /var/log/app/vpn_logs.log
+
+processors:
+  - add_fields:
+      target: ''
+      fields:
+        source_type: vpn
+
+output.kafka:
+  hosts: ["kafka:9092"]
+  topic: "raw_logs"
+  required_acks: 1
+  compression: gzip
+  codec.json:
+    pretty: false
