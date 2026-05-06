@@ -116,16 +116,23 @@ log-ai-assistant/
 
 ## 4. 环境准备
 
-- Python 3.11
+- Miniconda（推荐）
+- Python 3.10（与 `apache-flink==1.18.1` 兼容）
 - Docker / Docker Compose v2
 
 ```bash
 cd log-ai-assistant
-python3.11 -m venv .venv
-source .venv/bin/activate
+eval "$(conda shell.bash hook)"
+conda create -n log-ai-assistant python=3.10 -y
+conda activate log-ai-assistant
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 cp .env.example .env
 ```
+
+说明：
+- `requirements.txt` 中 `apache-flink==1.18.1` 仅在 Python `<3.11` 时安装。
+- 若你使用 Python `3.11/3.12`，可继续使用 `python src/main.py process-raw` 走演示链路（不依赖本地 PyFlink）。
 
 ## 5. 启动中间件
 
