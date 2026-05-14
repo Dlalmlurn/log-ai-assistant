@@ -44,3 +44,6 @@ log-generator/vpn_output/*.log
 *.pid
 *.out
 *.err
+
+# Codex development loop state
+.codex-loop/

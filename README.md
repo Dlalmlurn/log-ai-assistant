@@ -1,5 +1,21 @@
 # 日志分析 AI 助手（企业原型）
 
+## 0. 项目构建口径
+
+本项目后续开发以 `docs` 中的约束文档为准，甲方原始需求来自 `docs/初始需求文档.xlsx` 和 `docs/日志分析.xlsx`。其中：
+
+- `docs/00_gold_standard.md`：甲方需求基线和 `REQ-*` 编号。
+- `docs/01_product_shape.md`：产品形态、用户角色和核心页面。
+- `docs/02_architecture_decisions.md`：关键架构决策。
+- `docs/03_data_contract.md`：Kafka、Elasticsearch 和核心数据模型契约。
+- `docs/04_security_analysis_spec.md`：baseline、规则、风险分级和 AI 研判边界。
+- `docs/05_api_contract.md`：React 前端与 FastAPI 后端接口契约。
+- `docs/06_acceptance_checklist.md`：阶段验收清单。
+
+正式项目形态固定为：`日志源 -> Filebeat -> Kafka -> Flink -> Elasticsearch -> FastAPI -> React`。
+
+Streamlit 只作为历史 MVP 或调试入口保留，不再作为正式产品前端。Python Producer 和 `process-raw` 只作为调试兜底，不作为正式验收路径。
+
 面向企业日志安全分析的端到端原型系统：
 - 接入导师提供的 `log-generator`（优先保留其字段与输出格式）
 - Kafka 流式传输
@@ -7,10 +23,41 @@
 - Elasticsearch 存储与检索
 - UEBA 用户行为基线
 - 规则检测 + LLM（通义千问 / mock）研判
-- Streamlit 可视化看板
+- FastAPI API 层（规划中的正式后端）
+- React + TypeScript 工作台（规划中的正式前端）
+- Streamlit 调试看板（历史 MVP）
 - 每日安全态势简报
 
 ## 1. 项目架构
+
+正式目标架构：
+
+```text
+日志源 / log-generator 输出文件
+    |
+    v
+Filebeat
+    |
+    v
+Kafka: raw_logs
+    |
+    v
+Flink: raw_to_parsed / window stats
+    |
+    v
+Kafka: parsed_logs / alert_events
+    |
+    v
+Elasticsearch: security-logs / security-alerts / user-baselines / ai-reports / daily-reports
+    |
+    v
+FastAPI
+    |
+    v
+React + TypeScript 工作台
+```
+
+当前 MVP/调试链路：
 
 ```text
 mentor log-generator
@@ -19,7 +66,7 @@ mentor log-generator
 日志文件(jsonl/syslog/csv)
     |
     v
-Python Producer（当前默认）/ Filebeat（可替换）
+Python Producer（调试兜底）/ Filebeat（正式入口）
     |
     v
 Kafka: raw_logs
@@ -37,7 +84,7 @@ Kafka parsed_logs/alert_events -> Python consumer -> Elasticsearch
     +--> ai-reports
     +--> daily-reports
 
-Elasticsearch -> UEBA基线 / 异常查询 / AI研判 / Streamlit看板
+Elasticsearch -> UEBA基线 / 异常查询 / AI研判 / Streamlit调试看板
 ```
 
 ## 2. 已适配的导师 log-generator 结论
@@ -197,9 +244,13 @@ python src/main.py inspect-generator
 
 ## 9. 写入 Kafka raw_logs
 
-### 方案 A（当前默认，稳定）
+### 正式路径：Filebeat
 
-Python Producer 读取 `jsonl` 并发送：
+Filebeat 监听日志文件并推送 Kafka（`filebeat/filebeat.yml`）。正式验收时应使用这一路径，以满足全量/增量采集和实时链路口径。
+
+### 调试兜底：Python Producer
+
+Python Producer 可读取 `jsonl` 并发送，适合快速调试解析、检测和入库逻辑，但不作为正式验收路径：
 
 ```bash
 python src/main.py produce --run-generator --format jsonl --days 1 --count 120
@@ -207,11 +258,7 @@ python src/main.py produce --run-generator --format jsonl --days 1 --count 120
 python src/main.py produce --path log-generator/vpn_output/vpn_logs.jsonl
 ```
 
-### 方案 B（后续可替换）
-
-Filebeat 监听日志文件并推 Kafka（`filebeat/filebeat.yml` 已预留）。
-
-> 说明：当前优先使用 Python Producer 保证演示链路稳定，Filebeat 是后续可替换方案。
+> 说明：Python Producer 保留为 MVP 调试工具；正式路线必须逐步收敛到 Filebeat。
 
 ## 10. 启动 Flink 任务
 
@@ -318,13 +365,13 @@ python src/main.py report --date 2026-05-06
 - ES: `daily-reports`
 - 本地 Markdown: `data/daily_report_YYYY-MM-DD.md`
 
-## 16. 启动 Streamlit 看板
+## 16. 启动 Streamlit 调试看板
 
 ```bash
 streamlit run src/dashboard/app.py --server.port 8501
 ```
 
-页面包含：
+Streamlit 是历史 MVP 和调试入口，不是正式产品前端。页面包含：
 - 系统概览
 - 最近日志（多条件过滤）
 - 异常事件（过滤 + 明细 + 重新 AI 研判）
@@ -349,7 +396,7 @@ python src/main.py report
 python src/main.py health
 ```
 
-## 18. 验证演示流程
+## 18. 当前 MVP 调试流程
 
 1. `docker compose up -d`
 2. `python src/main.py health`
@@ -362,6 +409,8 @@ python src/main.py health
 9. `python src/main.py analyze-alerts`
 10. `python src/main.py report`
 11. `streamlit run src/dashboard/app.py`
+
+正式验收流程以后续 React + FastAPI 工作台和 `docs/06_acceptance_checklist.md` 为准。
 
 ## 19. 常见问题
 

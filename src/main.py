@@ -8,7 +8,6 @@ from pathlib import Path
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-import requests
 from kafka import KafkaAdminClient, KafkaProducer
 from kafka.admin import NewTopic
 from kafka.errors import TopicAlreadyExistsError
@@ -17,6 +16,7 @@ from src.ai_engine import AIAnalyzer
 from src.collector import run_generator_once, stream_file_to_kafka
 from src.config import PROJECT_ROOT, settings
 from src.detection import detect_batch
+from src.health import get_cli_health_payload
 from src.parser import normalize_raw_record, run_raw_to_parsed_worker
 from src.report import generate_daily_report
 from src.schemas import AlertEvent, NormalizedLog
@@ -241,44 +241,7 @@ def cmd_report(args: argparse.Namespace) -> None:
 
 
 def cmd_health(_: argparse.Namespace) -> None:
-    status = {
-        "kafka": False,
-        "elasticsearch": False,
-        "flink": False,
-        "dashscope_configured": bool(settings.dashscope_api_key),
-        "last_data_update": "N/A",
-    }
-
-    try:
-        admin = KafkaAdminClient(bootstrap_servers=settings.kafka_bootstrap_servers)
-        admin.list_topics()
-        admin.close()
-        status["kafka"] = True
-    except Exception:
-        status["kafka"] = False
-
-    es = ElasticStorage()
-    status["elasticsearch"] = es.health()
-
-    try:
-        resp = requests.get(f"{settings.flink_dashboard_url}/overview", timeout=3)
-        status["flink"] = resp.ok
-    except Exception:
-        status["flink"] = False
-
-    try:
-        latest = es.search(
-            settings.elasticsearch_log_index,
-            query={"match_all": {}},
-            size=1,
-            sort=[{"ingest_time": "desc"}],
-        )
-        if latest:
-            status["last_data_update"] = latest[0].get("ingest_time", "N/A")
-    except Exception:
-        pass
-
-    print(json.dumps(status, ensure_ascii=False, indent=2))
+    print(json.dumps(get_cli_health_payload(), ensure_ascii=False, indent=2))
 
 
 def build_parser() -> argparse.ArgumentParser:
