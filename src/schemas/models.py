@@ -1,13 +1,31 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 RiskLevel = Literal["低", "中", "高"]
 SourceType = Literal["vpn", "oa", "api", "system", "security_device"]
+ResponseItemT = TypeVar("ResponseItemT")
+
+
+class ListResponse(BaseModel, Generic[ResponseItemT]):
+    """REQ-003/REQ-004/REQ-005/REQ-006/REQ-008: standard paginated API list shape."""
+
+    items: list[ResponseItemT] = Field(default_factory=list)
+    total: int = Field(default=0, ge=0)
+    limit: int = Field(default=50, ge=1)
+    offset: int = Field(default=0, ge=0)
+
+
+class ErrorResponse(BaseModel):
+    """Standard API error response documented in docs/05_api_contract.md."""
+
+    code: str
+    message: str
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class NormalizedLog(BaseModel):
@@ -97,3 +115,23 @@ class DailyReport(BaseModel):
     ai_summary: str
     recommendation: str
     markdown: str
+
+
+class NormalizedLogListResponse(ListResponse[NormalizedLog]):
+    """REQ-002/REQ-006: reusable list response for structured logs."""
+
+
+class AlertEventListResponse(ListResponse[AlertEvent]):
+    """REQ-004/REQ-006/REQ-008: reusable list response for alert events."""
+
+
+class UserBaselineListResponse(ListResponse[UserBaseline]):
+    """REQ-003/REQ-006: reusable list response for user baselines."""
+
+
+class AIReportListResponse(ListResponse[AIReport]):
+    """REQ-004/REQ-006: reusable list response for AI reports."""
+
+
+class DailyReportListResponse(ListResponse[DailyReport]):
+    """REQ-005/REQ-006: reusable list response for daily reports."""
