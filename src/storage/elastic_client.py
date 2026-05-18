@@ -17,7 +17,7 @@ class ElasticStorage:
             return bool(self.client.ping())
         except Exception:
             return False
-
+# 确保索引存在
     def ensure_indices(self) -> None:
         for name, body in index_templates().items():
             if not self.client.indices.exists(index=name):
@@ -43,7 +43,7 @@ class ElasticStorage:
     def count(self, index: str, query: dict[str, Any] | None = None) -> int:
         payload = {"query": query or {"match_all": {}}}
         return int(self.client.count(index=index, body=payload)["count"])
-
+# 从es查询数据
     def search(
         self,
         index: str,
@@ -56,6 +56,28 @@ class ElasticStorage:
             body["sort"] = sort
         resp = self.client.search(index=index, body=body)
         return [hit["_source"] | {"_id": hit["_id"]} for hit in resp["hits"]["hits"]]
+
+# 带分页能力的 search
+    def search_page(
+        self,
+        index: str,
+        query: dict[str, Any] | None = None,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        sort: list[dict[str, str]] | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        body: dict[str, Any] = {
+            "query": query or {"match_all": {}},
+            "from": offset,
+            "size": limit,
+            "track_total_hits": True,
+        }
+        if sort:
+            body["sort"] = sort
+        resp = self.client.search(index=index, body=body)
+        hits = resp["hits"]["hits"]
+        return [hit["_source"] | {"_id": hit["_id"]} for hit in hits], _extract_total_hits(resp)
 
     def aggregate(self, index: str, body: dict[str, Any]) -> dict[str, Any]:
         return self.client.search(index=index, body=body)
@@ -85,6 +107,13 @@ class ElasticStorage:
             size=size,
             sort=[{time_field: "desc"}],
         )
+
+
+def _extract_total_hits(resp: dict[str, Any]) -> int:
+    total = resp.get("hits", {}).get("total", 0)
+    if isinstance(total, dict):
+        return int(total.get("value", 0))
+    return int(total or 0)
 
 
 def index_templates() -> dict[str, dict[str, Any]]:

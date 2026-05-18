@@ -49,6 +49,7 @@ class NormalizedLog(BaseModel):
     raw_message: str
     risk_tags: list[str] = Field(default_factory=list)
     trace_id: str | None = None
+    original_fields: dict[str, Any] = Field(default_factory=dict)
 
 
 class AlertEvent(BaseModel):

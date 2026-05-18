@@ -9,12 +9,14 @@ from .models import (
     ListResponse,
     NormalizedLog,
     NormalizedLogListResponse,
+    SourceType,
     UserBaseline,
     UserBaselineListResponse,
 )
 
 __all__ = [
     "NormalizedLog",
+    "SourceType",
     "AlertEvent",
     "UserBaseline",
     "AIReport",
