@@ -12,10 +12,14 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from src.ai_engine import AIAnalyzer
 from src.config import settings
 from src.health import HealthResponse, get_health_status
+from src.report.daily_report import generate_daily_report
 from src.schemas import (
     AIReport,
+    AIReportListResponse,
     AlertDetailResponse,
     BaselineRebuildResponse,
+    DailyReport,
+    DailyReportListResponse,
     ErrorResponse,
     EvidenceChain,
     AlertEvent,
@@ -292,7 +296,7 @@ def get_alert_detail(
 
 
 @app.post(
-    "/api/v1/alerts/{alerty_id}/analze",
+    "/api/v1/alerts/{alert_id}/analyze",
     response_model=AIReport,
     responses=STANDARD_ERROR_RESPONSES,
     tags=["alerts"],
@@ -474,6 +478,129 @@ def get_baseline_detail(
         )
 
     return UserBaseline(**_strip_elasticsearch_metadata(items)[0])
+
+
+@app.get(
+    "/api/v1/ai-reports",
+    response_model=AIReportListResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["ai-reports"],
+    summary="Query AI analysis reports",
+    description="REQ-004, REQ-006: query AI analysis reports from Elasticsearch ai-reports for the React AI analysis view.",
+)
+def list_ai_reports(
+    limit: int = Query(default=50, ge=1),
+    offset: int = Query(default=0, ge=0),
+    storage: ElasticStorage = Depends(get_storage),
+) -> AIReportListResponse:
+    try:
+        items, total = storage.search_page(
+            index=settings.elasticsearch_ai_index,
+            query={"match_all": {}},
+            limit=limit,
+            offset=offset,
+            sort=[{"created_at": "desc"}],
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "elasticsearch_query_failed",
+                "message": "Failed to query AI reports from Elasticsearch",
+                "details": {"index": settings.elasticsearch_ai_index},
+            },
+        ) from exc
+
+    return AIReportListResponse(
+        items=_strip_elasticsearch_metadata(items),
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get(
+    "/api/v1/daily-reports",
+    response_model=DailyReportListResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["daily-reports"],
+    summary="Query daily security reports",
+    description="REQ-005, REQ-006: query daily security posture reports from Elasticsearch daily-reports.",
+)
+def list_daily_reports(
+    limit: int = Query(default=50, ge=1),
+    offset: int = Query(default=0, ge=0),
+    storage: ElasticStorage = Depends(get_storage),
+) -> DailyReportListResponse:
+    try:
+        items, total = storage.search_page(
+            index=settings.elasticsearch_daily_index,
+            query={"match_all": {}},
+            limit=limit,
+            offset=offset,
+            sort=[{"date": "desc"}],
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "elasticsearch_query_failed",
+                "message": "Failed to query daily reports from Elasticsearch",
+                "details": {"index": settings.elasticsearch_daily_index},
+            },
+        ) from exc
+
+    return DailyReportListResponse(
+        items=_strip_elasticsearch_metadata(items),
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.post(
+    "/api/v1/daily-reports",
+    response_model=DailyReport,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["daily-reports"],
+    summary="Generate a daily security report",
+    description="REQ-005: generate a daily security posture report for the specified date and store it in Elasticsearch daily-reports.",
+)
+def create_daily_report(
+    date: str | None = Query(default=None, description="Date in YYYY-MM-DD format. Defaults to today (UTC)."),
+    storage: ElasticStorage = Depends(get_storage),
+) -> DailyReport:
+    try:
+        storage.ensure_indices()
+        report = generate_daily_report(storage, date_str=date)
+        report_doc = report.model_dump(mode="json")
+        storage.index_document(
+            settings.elasticsearch_daily_index, report_doc, doc_id=report.report_id
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_date",
+                "message": str(exc),
+                "details": {"date": date},
+            },
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "daily_report_generation_failed",
+                "message": "Failed to generate daily report",
+                "details": {
+                    "date": date,
+                    "source_index": settings.elasticsearch_log_index,
+                    "target_index": settings.elasticsearch_daily_index,
+                },
+            },
+        ) from exc
+
+    return report
 
 
 @app.exception_handler(StarletteHTTPException)
