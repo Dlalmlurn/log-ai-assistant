@@ -20,10 +20,19 @@ import {
   XCircle
 } from "lucide-react";
 
-import { ApiRequestError, fetchHealth, fetchLogs } from "./api";
-import type { HealthResponse, LogsQuery, NormalizedLog, SourceType } from "./types";
+import { ApiRequestError, fetchAlertDetail, fetchAlerts, fetchHealth, fetchLogs } from "./api";
+import type {
+  AlertDetailResponse,
+  AlertEvent,
+  AlertsQuery,
+  HealthResponse,
+  LogsQuery,
+  NormalizedLog,
+  RiskLevel,
+  SourceType
+} from "./types";
 
-type PageKey = "logs" | "status";
+type PageKey = "logs" | "alerts" | "status";
 
 type LoadState<T> = {
   data: T | null;
@@ -53,6 +62,25 @@ const sourceTypes: Array<{ label: string; value: SourceType | "" }> = [
 ];
 
 const statusOptions = ["", "success", "failed", "blocked", "error"];
+const alertStatusOptions = ["", "new", "analyzed", "closed"];
+const riskLevelOptions: Array<{ label: string; value: RiskLevel | "" }> = [
+  { label: "All risk levels", value: "" },
+  { label: "低", value: "低" },
+  { label: "中", value: "中" },
+  { label: "高", value: "高" },
+  { label: "紧急", value: "紧急" }
+];
+
+const initialAlertsQuery: AlertsQuery = {
+  risk_level: "",
+  username: "",
+  rule: "",
+  status: "",
+  start_time: "",
+  end_time: "",
+  limit: 50,
+  offset: 0
+};
 
 function App() {
   const [page, setPage] = useState<PageKey>("logs");
@@ -73,6 +101,10 @@ function App() {
             <TerminalSquare aria-hidden="true" />
             Realtime Logs
           </button>
+          <button className={page === "alerts" ? "active" : ""} type="button" onClick={() => setPage("alerts")}>
+            <AlertCircle aria-hidden="true" />
+            Alerts
+          </button>
           <button className={page === "status" ? "active" : ""} type="button" onClick={() => setPage("status")}>
             <Activity aria-hidden="true" />
             System Status
@@ -90,7 +122,9 @@ function App() {
       </aside>
 
       <main className="workspace">
-        {page === "logs" ? <RealtimeLogsPage /> : <SystemStatusPage />}
+        {page === "logs" ? <RealtimeLogsPage /> : null}
+        {page === "alerts" ? <AlertsPage /> : null}
+        {page === "status" ? <SystemStatusPage /> : null}
       </main>
     </div>
   );
@@ -507,6 +541,409 @@ function RealtimeLogsPage() {
   );
 }
 
+function AlertsPage() {
+  const [query, setQuery] = useState<AlertsQuery>(initialAlertsQuery);
+  const [draft, setDraft] = useState<AlertsQuery>(initialAlertsQuery);
+  const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
+  const [listState, setListState] = useState<LoadState<{ items: AlertEvent[]; total: number }>>({
+    data: null,
+    loading: true,
+    error: null,
+    updatedAt: null
+  });
+  const [detailState, setDetailState] = useState<LoadState<AlertDetailResponse>>({
+    data: null,
+    loading: false,
+    error: null,
+    updatedAt: null
+  });
+
+  const loadAlerts = useCallback((activeQuery: AlertsQuery, signal?: AbortSignal) => {
+    setListState((current) => ({ ...current, loading: true, error: null }));
+    fetchAlerts(activeQuery, signal)
+      .then((data) => {
+        setListState({
+          data: { items: data.items, total: data.total },
+          loading: false,
+          error: null,
+          updatedAt: new Date()
+        });
+        setSelectedAlertId((current) => {
+          if (current && data.items.some((alert) => alert.alert_id === current)) {
+            return current;
+          }
+          return data.items[0]?.alert_id ?? null;
+        });
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        setListState((current) => ({
+          ...current,
+          loading: false,
+          error: formatError(error)
+        }));
+      });
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    loadAlerts(query, controller.signal);
+
+    return () => controller.abort();
+  }, [loadAlerts, query]);
+
+  useEffect(() => {
+    if (!selectedAlertId) {
+      setDetailState({ data: null, loading: false, error: null, updatedAt: null });
+      return;
+    }
+
+    const controller = new AbortController();
+    setDetailState((current) => ({ ...current, loading: true, error: null }));
+    fetchAlertDetail(selectedAlertId, controller.signal)
+      .then((data) => {
+        setDetailState({ data, loading: false, error: null, updatedAt: new Date() });
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        setDetailState((current) => ({
+          ...current,
+          loading: false,
+          error: formatError(error)
+        }));
+      });
+
+    return () => controller.abort();
+  }, [selectedAlertId]);
+
+  const applyFilters = () => {
+    setQuery({ ...draft, offset: 0 });
+  };
+
+  const clearFilters = () => {
+    setDraft(initialAlertsQuery);
+    setQuery(initialAlertsQuery);
+  };
+
+  const canGoPrevious = query.offset > 0;
+  const canGoNext = Boolean(listState.data && query.offset + query.limit < listState.data.total);
+
+  return (
+    <section className="page">
+      <PageHeader
+        kicker="REQ-004 / REQ-006 / REQ-008"
+        title="Alerts"
+        description="Abnormal events queried from FastAPI, backed by Elasticsearch security-alerts and related evidence."
+        action={
+          <button className="icon-button primary" type="button" onClick={() => loadAlerts(query)} disabled={listState.loading}>
+            <RefreshCcw aria-hidden="true" className={listState.loading ? "spin" : ""} />
+            Refresh
+          </button>
+        }
+      />
+
+      {listState.error ? <ErrorBanner message={listState.error} /> : null}
+
+      <form
+        className="filters alerts-filters"
+        onSubmit={(event) => {
+          event.preventDefault();
+          applyFilters();
+        }}
+      >
+        <label>
+          <span>Risk</span>
+          <select
+            value={draft.risk_level}
+            onChange={(event) => setDraft((current) => ({ ...current, risk_level: event.target.value as RiskLevel | "" }))}
+          >
+            {riskLevelOptions.map((option) => (
+              <option key={option.value || "all"} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          <span>Username</span>
+          <input
+            value={draft.username}
+            placeholder="alice"
+            onChange={(event) => setDraft((current) => ({ ...current, username: event.target.value }))}
+          />
+        </label>
+
+        <label>
+          <span>Rule</span>
+          <input
+            value={draft.rule}
+            placeholder="新IP登录"
+            onChange={(event) => setDraft((current) => ({ ...current, rule: event.target.value }))}
+          />
+        </label>
+
+        <label>
+          <span>Status</span>
+          <select value={draft.status} onChange={(event) => setDraft((current) => ({ ...current, status: event.target.value }))}>
+            {alertStatusOptions.map((option) => (
+              <option key={option || "all"} value={option}>
+                {option || "All statuses"}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          <span>Start time</span>
+          <input
+            type="datetime-local"
+            value={toDatetimeLocalInput(draft.start_time)}
+            onChange={(event) => setDraft((current) => ({ ...current, start_time: toApiDateTime(event.target.value) }))}
+          />
+        </label>
+
+        <label>
+          <span>End time</span>
+          <input
+            type="datetime-local"
+            value={toDatetimeLocalInput(draft.end_time)}
+            onChange={(event) => setDraft((current) => ({ ...current, end_time: toApiDateTime(event.target.value) }))}
+          />
+        </label>
+
+        <label>
+          <span>Limit</span>
+          <select
+            value={draft.limit}
+            onChange={(event) => setDraft((current) => ({ ...current, limit: Number(event.target.value) }))}
+          >
+            {[25, 50, 100].map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="filter-actions">
+          <button className="icon-button primary" type="submit">
+            <Search aria-hidden="true" />
+            Apply
+          </button>
+          <button className="icon-button" type="button" onClick={clearFilters}>
+            <Filter aria-hidden="true" />
+            Clear
+          </button>
+        </div>
+      </form>
+
+      <div className="alerts-layout">
+        <section className="alerts-list-panel" aria-label="Alert list">
+          <div className="table-toolbar">
+            <div>
+              <strong>{listState.data?.total.toLocaleString() ?? "0"} alerts</strong>
+              <span>
+                Showing {listState.data?.items.length ? query.offset + 1 : 0}-
+                {Math.min(query.offset + query.limit, listState.data?.total ?? 0)} from /api/v1/alerts
+              </span>
+            </div>
+            <div className="toolbar-meta">
+              <span>{listState.updatedAt ? `Updated ${listState.updatedAt.toLocaleTimeString()}` : "Waiting for data"}</span>
+            </div>
+          </div>
+
+          <div className="log-table-wrap alerts-table-wrap">
+            <table className="log-table alerts-table">
+              <thead>
+                <tr>
+                  <th>Detect time</th>
+                  <th>Risk</th>
+                  <th>User</th>
+                  <th>Source IP</th>
+                  <th>Rule hits</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {listState.data?.items.map((alert) => (
+                  <tr
+                    key={alert.alert_id}
+                    className={selectedAlertId === alert.alert_id ? "selected-row" : ""}
+                    tabIndex={0}
+                    onClick={() => setSelectedAlertId(alert.alert_id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setSelectedAlertId(alert.alert_id);
+                      }
+                    }}
+                  >
+                    <td>
+                      <time dateTime={alert.detect_time}>{formatDateTime(alert.detect_time)}</time>
+                      <small>{alert.alert_id}</small>
+                    </td>
+                    <td>
+                      <span className={`risk-chip ${riskTone(alert.risk_level)}`}>{alert.risk_level}</span>
+                      <small>score {alert.risk_score}</small>
+                    </td>
+                    <td>{alert.username || "unknown"}</td>
+                    <td>{alert.src_ip || "n/a"}</td>
+                    <td>
+                      <div className="tag-list">
+                        {alert.rule_hits.length > 0 ? alert.rule_hits.map((rule) => <span key={rule}>{rule}</span>) : <span className="muted">none</span>}
+                      </div>
+                    </td>
+                    <td>
+                      <span className={`status-chip ${alertStatusTone(alert.status)}`}>{alert.status}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            {listState.loading && !listState.data ? <TableSkeleton /> : null}
+            {!listState.loading && listState.data?.items.length === 0 ? (
+              <EmptyState title="No alerts matched" detail="Adjust filters or confirm that the detection pipeline has written security-alerts." />
+            ) : null}
+          </div>
+
+          <div className="pagination">
+            <button
+              className="icon-button"
+              type="button"
+              disabled={!canGoPrevious}
+              onClick={() => setQuery((current) => ({ ...current, offset: Math.max(0, current.offset - current.limit) }))}
+            >
+              Previous
+            </button>
+            <span>Offset {query.offset.toLocaleString()}</span>
+            <button
+              className="icon-button"
+              type="button"
+              disabled={!canGoNext}
+              onClick={() => setQuery((current) => ({ ...current, offset: current.offset + current.limit }))}
+            >
+              Next
+            </button>
+          </div>
+        </section>
+
+        <AlertDetailPanel state={detailState} selectedAlertId={selectedAlertId} />
+      </div>
+    </section>
+  );
+}
+
+function AlertDetailPanel({
+  state,
+  selectedAlertId
+}: {
+  state: LoadState<AlertDetailResponse>;
+  selectedAlertId: string | null;
+}) {
+  const detail = state.data;
+
+  if (!selectedAlertId) {
+    return (
+      <aside className="detail-panel">
+        <EmptyState title="Select an alert" detail="Alert detail will show the evidence chain, related logs, baseline, and AI report from FastAPI." />
+      </aside>
+    );
+  }
+
+  return (
+    <aside className="detail-panel">
+      <div className="detail-panel-header">
+        <div>
+          <span className="eyebrow">Alert detail</span>
+          <h2>{detail?.alert.alert_id ?? selectedAlertId}</h2>
+        </div>
+        {detail ? <StatusPill ok={detail.alert.status === "analyzed"} label={detail.alert.status} /> : null}
+      </div>
+
+      {state.error ? <ErrorBanner message={state.error} /> : null}
+      {state.loading && !detail ? <TableSkeleton /> : null}
+
+      {detail ? (
+        <div className="detail-stack">
+          <section className="detail-section">
+            <div className="detail-section-title">
+              <h3>Rule Hits</h3>
+              <span>{detail.evidence_chain.rule_hits.length} rules</span>
+            </div>
+            <div className="tag-list">
+              {detail.evidence_chain.rule_hits.length > 0 ? (
+                detail.evidence_chain.rule_hits.map((rule) => <span key={rule}>{rule}</span>)
+              ) : (
+                <span className="muted">none</span>
+              )}
+            </div>
+          </section>
+
+          <section className="detail-section">
+            <div className="detail-section-title">
+              <h3>Evidence Chain</h3>
+              <span>{detail.evidence_chain.baseline_deviations.length} baseline deviations</span>
+            </div>
+            <p className="risk-reason">{detail.evidence_chain.risk_reason || "No risk reason returned."}</p>
+            {detail.evidence_chain.baseline_deviations.length > 0 ? (
+              <ul className="evidence-list">
+                {detail.evidence_chain.baseline_deviations.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="muted">No baseline deviations returned.</p>
+            )}
+            <JsonBlock value={detail.alert.evidence} />
+          </section>
+
+          <section className="detail-section">
+            <div className="detail-section-title">
+              <h3>Related Logs</h3>
+              <span>{detail.related_logs.length} events</span>
+            </div>
+            <div className="related-log-list">
+              {detail.related_logs.map((log) => (
+                <article key={log.event_id} className="related-log-item">
+                  <div>
+                    <strong>{log.action}</strong>
+                    <span>{formatDateTime(log.event_time)}</span>
+                  </div>
+                  <p>{log.message}</p>
+                  <small>{log.event_id}</small>
+                </article>
+              ))}
+              {detail.related_logs.length === 0 ? <p className="muted">No related logs returned.</p> : null}
+            </div>
+          </section>
+
+          <section className="detail-section">
+            <div className="detail-section-title">
+              <h3>Baseline</h3>
+              <span>{isEmptyRecord(detail.baseline) ? "missing" : "available"}</span>
+            </div>
+            {isEmptyRecord(detail.baseline) ? <p className="muted">No baseline returned for this alert.</p> : <JsonBlock value={detail.baseline} />}
+          </section>
+
+          <section className="detail-section">
+            <div className="detail-section-title">
+              <h3>AI Report</h3>
+              <span>{isEmptyRecord(detail.ai_report) ? "not generated" : "stored"}</span>
+            </div>
+            {isEmptyRecord(detail.ai_report) ? <p className="muted">No AI report returned for this alert.</p> : <JsonBlock value={detail.ai_report} />}
+          </section>
+        </div>
+      ) : null}
+    </aside>
+  );
+}
+
 function PageHeader({
   kicker,
   title,
@@ -655,6 +1092,38 @@ function statusTone(status: string): string {
     return "danger";
   }
   return "neutral";
+}
+
+function alertStatusTone(status: string): string {
+  const normalized = status.toLowerCase();
+  if (normalized === "analyzed" || normalized === "closed") {
+    return "good";
+  }
+  if (normalized === "new") {
+    return "danger";
+  }
+  return "neutral";
+}
+
+function riskTone(riskLevel: RiskLevel): string {
+  if (riskLevel === "紧急") {
+    return "critical";
+  }
+  if (riskLevel === "高") {
+    return "high";
+  }
+  if (riskLevel === "中") {
+    return "medium";
+  }
+  return "low";
+}
+
+function JsonBlock({ value }: { value: unknown }) {
+  return <pre className="json-block">{JSON.stringify(value, null, 2)}</pre>;
+}
+
+function isEmptyRecord(value: Record<string, unknown>): boolean {
+  return Object.keys(value).length === 0;
 }
 
 function toApiDateTime(value: string): string {
