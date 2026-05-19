@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.config import settings
 from src.health import HealthResponse, get_health_status
-from src.schemas import ErrorResponse, NormalizedLogListResponse, SourceType
+from src.schemas import ErrorResponse, NormalizedLog, NormalizedLogListResponse, SourceType
 from src.storage import ElasticStorage
 
 
@@ -111,6 +111,48 @@ def list_logs(
         limit=limit,
         offset=offset,
     )
+
+
+@app.get(
+    "/api/v1/logs/{event_id}",
+    response_model=NormalizedLog,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["logs"],
+    summary="Get structured security log detail",
+    description="REQ-002, REQ-006: fetch one normalized log by event_id from Elasticsearch security-logs.",
+)
+def get_log_detail(
+    event_id: str,
+    storage: ElasticStorage = Depends(get_storage),
+) -> NormalizedLog:
+    try:
+        items, _total = storage.search_page(
+            index=settings.elasticsearch_log_index,
+            query={"term": {"event_id": event_id}},
+            limit=1,
+            offset=0,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "elasticsearch_query_failed",
+                "message": "Failed to query structured log detail from Elasticsearch",
+                "details": {"index": settings.elasticsearch_log_index, "event_id": event_id},
+            },
+        ) from exc
+
+    if not items:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "log_not_found",
+                "message": "Structured log not found",
+                "details": {"index": settings.elasticsearch_log_index, "event_id": event_id},
+            },
+        )
+
+    return NormalizedLog(**_strip_elasticsearch_metadata(items)[0])
 
 
 @app.exception_handler(StarletteHTTPException)

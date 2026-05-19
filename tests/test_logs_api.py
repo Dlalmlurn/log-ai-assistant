@@ -1,6 +1,9 @@
 from datetime import datetime, timezone
 
-from src.api.app import _build_logs_query, app, list_logs
+import pytest
+from fastapi import HTTPException
+
+from src.api.app import _build_logs_query, app, get_log_detail, list_logs
 from src.config import settings
 from src.storage.elastic_client import ElasticStorage
 
@@ -33,6 +36,16 @@ class FakeLogStorage:
         )
 
 
+class FakeLogDetailStorage:
+    def __init__(self, items: list[dict[str, object]] | None = None) -> None:
+        self.items = items or []
+        self.calls: list[dict[str, object]] = []
+
+    def search_page(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.items, len(self.items)
+
+
 def test_logs_query_applies_documented_filters() -> None:
     start = datetime(2026, 5, 13, 9, 0, tzinfo=timezone.utc)
     end = datetime(2026, 5, 13, 10, 0, tzinfo=timezone.utc)
@@ -57,6 +70,58 @@ def test_logs_query_applies_documented_filters() -> None:
     assert response.total == 7
     assert response.limit == 25
     assert response.offset == 50
+
+
+def test_log_detail_queries_security_logs_by_event_id() -> None:
+    storage = FakeLogDetailStorage(
+        [
+            {
+                "_id": "es-doc-1",
+                "event_id": "evt-1",
+                "event_time": "2026-05-13T10:00:00Z",
+                "ingest_time": "2026-05-13T10:00:05Z",
+                "source_type": "vpn",
+                "username": "alice",
+                "src_ip": "10.0.0.7",
+                "action": "login",
+                "status": "success",
+                "message": "VPN login success",
+                "raw_message": "raw vpn line",
+                "risk_tags": [],
+                "original_fields": {"vpn_result": "ok"},
+            }
+        ]
+    )
+
+    response = get_log_detail(event_id="evt-1", storage=storage)
+    item = response.model_dump(mode="json")
+
+    assert item["event_id"] == "evt-1"
+    assert item["original_fields"] == {"vpn_result": "ok"}
+    assert "_id" not in item
+    assert storage.calls == [
+        {
+            "index": settings.elasticsearch_log_index,
+            "query": {"term": {"event_id": "evt-1"}},
+            "limit": 1,
+            "offset": 0,
+        }
+    ]
+
+
+def test_log_detail_returns_clear_404_error_when_missing() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        get_log_detail(event_id="missing-event", storage=FakeLogDetailStorage())
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == {
+        "code": "log_not_found",
+        "message": "Structured log not found",
+        "details": {
+            "index": settings.elasticsearch_log_index,
+            "event_id": "missing-event",
+        },
+    }
 
 
 def test_logs_endpoint_queries_security_logs_with_pagination_and_filters() -> None:
@@ -126,6 +191,20 @@ def test_logs_openapi_binds_contract_and_error_shape() -> None:
 
     assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/NormalizedLogListResponse"
+    }
+    assert operation["responses"]["500"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
+    }
+
+
+def test_log_detail_openapi_binds_contract_and_error_shape() -> None:
+    operation = app.openapi()["paths"]["/api/v1/logs/{event_id}"]["get"]
+
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/NormalizedLog"
+    }
+    assert operation["responses"]["404"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
     }
     assert operation["responses"]["500"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ErrorResponse"
