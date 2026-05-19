@@ -104,6 +104,14 @@
 }
 ```
 
+### Baseline Rebuild Response
+
+```json
+{
+  "rebuilt_count": 12
+}
+```
+
 ## Frontend Page Mapping
 
 | 页面 | 必须调用的 API |

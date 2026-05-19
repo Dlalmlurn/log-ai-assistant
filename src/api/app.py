@@ -13,6 +13,7 @@ from src.config import settings
 from src.health import HealthResponse, get_health_status
 from src.schemas import (
     AlertDetailResponse,
+    BaselineRebuildResponse,
     ErrorResponse,
     EvidenceChain,
     NormalizedLog,
@@ -22,6 +23,7 @@ from src.schemas import (
     UserBaselineListResponse,
 )
 from src.storage import ElasticStorage
+from src.ueba import build_and_store_baselines
 
 
 ERROR_RESPONSE_SCHEMA = {
@@ -264,6 +266,36 @@ def list_baselines(
         limit=limit,
         offset=offset,
     )
+
+
+@app.post(
+    "/api/v1/baselines/rebuild",
+    response_model=BaselineRebuildResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["baselines"],
+    summary="Rebuild user behavior baselines",
+    description="REQ-003: rebuild user behavior baselines from Elasticsearch security-logs and store them in user-baselines.",
+)
+def rebuild_baselines(
+    storage: ElasticStorage = Depends(get_storage),
+) -> BaselineRebuildResponse:
+    try:
+        storage.ensure_indices()
+        baselines = build_and_store_baselines(storage)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "baseline_rebuild_failed",
+                "message": "Failed to rebuild user baselines",
+                "details": {
+                    "source_index": settings.elasticsearch_log_index,
+                    "target_index": settings.elasticsearch_baseline_index,
+                },
+            },
+        ) from exc
+
+    return BaselineRebuildResponse(rebuilt_count=len(baselines))
 
 
 @app.get(

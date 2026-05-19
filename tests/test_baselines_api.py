@@ -1,8 +1,13 @@
+import importlib
+
 import pytest
 from fastapi import HTTPException
 
-from src.api.app import app, get_baseline_detail, list_baselines
+from src.api.app import app, get_baseline_detail, list_baselines, rebuild_baselines
 from src.config import settings
+
+
+api_app_module = importlib.import_module("src.api.app")
 
 
 BASELINE_DOC = {
@@ -30,8 +35,21 @@ class FakeBaselineStorage:
         return self.items, self.total
 
 
+class FakeRebuildStorage:
+    def __init__(self) -> None:
+        self.ensure_indices_called = False
+
+    def ensure_indices(self) -> None:
+        self.ensure_indices_called = True
+
+
 class FailingBaselineStorage:
     def search_page(self, **_kwargs):
+        raise RuntimeError("es unavailable")
+
+
+class FailingRebuildStorage:
+    def ensure_indices(self) -> None:
         raise RuntimeError("es unavailable")
 
 
@@ -103,11 +121,74 @@ def test_baseline_query_failures_return_standard_error_shape() -> None:
     }
 
 
+def test_rebuild_baselines_uses_existing_builder_and_returns_count(monkeypatch) -> None:
+    storage = FakeRebuildStorage()
+    calls: list[object] = []
+
+    def fake_build_and_store_baselines(passed_storage):
+        calls.append(passed_storage)
+        return [object(), object(), object()]
+
+    monkeypatch.setattr(api_app_module, "build_and_store_baselines", fake_build_and_store_baselines)
+
+    response = rebuild_baselines(storage=storage)
+
+    assert response.model_dump() == {"rebuilt_count": 3}
+    assert storage.ensure_indices_called is True
+    assert calls == [storage]
+
+
+def test_rebuild_baselines_returns_standard_error_shape_when_builder_fails(monkeypatch) -> None:
+    def fake_build_and_store_baselines(_storage):
+        raise RuntimeError("rebuild failed")
+
+    monkeypatch.setattr(api_app_module, "build_and_store_baselines", fake_build_and_store_baselines)
+
+    with pytest.raises(HTTPException) as exc_info:
+        rebuild_baselines(storage=FakeRebuildStorage())
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == {
+        "code": "baseline_rebuild_failed",
+        "message": "Failed to rebuild user baselines",
+        "details": {
+            "source_index": settings.elasticsearch_log_index,
+            "target_index": settings.elasticsearch_baseline_index,
+        },
+    }
+
+
+def test_rebuild_baselines_returns_standard_error_shape_when_index_setup_fails() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        rebuild_baselines(storage=FailingRebuildStorage())
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == {
+        "code": "baseline_rebuild_failed",
+        "message": "Failed to rebuild user baselines",
+        "details": {
+            "source_index": settings.elasticsearch_log_index,
+            "target_index": settings.elasticsearch_baseline_index,
+        },
+    }
+
+
 def test_baselines_openapi_binds_contract_and_error_shape() -> None:
     operation = app.openapi()["paths"]["/api/v1/baselines"]["get"]
 
     assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/UserBaselineListResponse"
+    }
+    assert operation["responses"]["500"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
+    }
+
+
+def test_baseline_rebuild_openapi_binds_contract_and_error_shape() -> None:
+    operation = app.openapi()["paths"]["/api/v1/baselines/rebuild"]["post"]
+
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/BaselineRebuildResponse"
     }
     assert operation["responses"]["500"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ErrorResponse"

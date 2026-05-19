@@ -85,6 +85,12 @@ class UserBaseline(BaseModel):
     updated_at: datetime
 
 
+class BaselineRebuildResponse(BaseModel):
+    """REQ-003: response for rebuilding user behavior baselines."""
+
+    rebuilt_count: int = Field(ge=0)
+
+
 class AIReport(BaseModel):
     model_config = ConfigDict(extra="allow")
 
