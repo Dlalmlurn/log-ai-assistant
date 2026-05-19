@@ -509,12 +509,23 @@ def _build_alerts_query(
         if value is not None:
             filters.append({"term": {field: value}})
 
-    if rule:
-        filters.append({"match_phrase": {"rule_hits": rule}})
+    if rule and rule.strip():
+        escaped_rule = _escape_elasticsearch_wildcard_value(rule.strip())
+        filters.append(
+            {
+                "wildcard": {
+                    "rule_hits": {"value": f"*{escaped_rule}*"}
+                }
+            }
+        )
 
     if not filters:
         return {"match_all": {}}
     return {"bool": {"filter": filters}}
+
+
+def _escape_elasticsearch_wildcard_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("*", "\\*").replace("?", "\\?")
 
 
 def _strip_elasticsearch_metadata(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

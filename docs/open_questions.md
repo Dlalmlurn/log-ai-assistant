@@ -45,7 +45,7 @@
 
 ### OQ-20260519-01: Clarify `/api/v1/alerts` `rule` Filter Semantics
 
-**Status:** Open
+**Status:** Resolved
 **Tags:** api, alerts, elasticsearch, product, frontend
 **Owner:** TBD
 **Related:** `GET /api/v1/alerts`, `rule_hits`, `docs/05_api_contract.md`, REQ-004, REQ-006, REQ-008
@@ -55,8 +55,8 @@
 **Question:** Should the `rule` query parameter mean exact rule-name matching, keyword/phrase search, or broader fuzzy search?
 
 **Context:**
-- The current proposed implementation follows the existing Streamlit dashboard behavior with `{"match_phrase": {"rule_hits": rule}}`.
-- This works well for keyword or short phrase search, such as searching `新IP登录` to match `新IP登录后短时间访问敏感资源`.
+- The previous proposed implementation followed the existing Streamlit dashboard behavior with `{"match_phrase": {"rule_hits": rule}}`.
+- Because `rule_hits` is mapped as `keyword`, the formal API now uses a keyword contains query so searching `新IP登录` matches `新IP登录后短时间访问敏感资源`.
 - `rule_hits` is modeled as an Elasticsearch `keyword` field, where `term` matching is usually the clearest exact-match strategy.
 
 **Options:**
@@ -64,7 +64,7 @@
 - Keyword/phrase search: use `match_phrase`; best for an MVP search box and consistent with the existing dashboard.
 - Broader fuzzy search: use `wildcard`, `match`, or add a dedicated analyzed field; more flexible but requires clearer ES mapping and performance checks.
 
-**Current Decision:** Use keyword/phrase search for MVP to stay consistent with the existing dashboard behavior.
+**Current Decision:** Use keyword contains search over the `rule_hits` keyword field. The API escapes user-provided wildcard metacharacters before wrapping the value in `*...*`, so `*` and `?` in user input are treated as ordinary characters.
 
 **Risk If Unresolved:** Frontend controls may imply different semantics from the backend query; a dropdown suggests exact matching, while a search input suggests keyword matching.
 
@@ -72,3 +72,5 @@
 - Decide whether the frontend control is a free-text search input or a rule-name dropdown.
 - Update `docs/05_api_contract.md` to name the semantic clearly.
 - Update `GET /api/v1/alerts` implementation and tests if the final decision differs from `match_phrase`.
+
+**Resolution Notes:** Resolved on 2026-05-19 as free-text keyword contains search for the React alerts view.

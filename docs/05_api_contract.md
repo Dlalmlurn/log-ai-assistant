@@ -52,7 +52,7 @@
 | --- | --- | --- |
 | `risk_level` | string | 可选，`低/中/高/紧急`。 |
 | `username` | string | 可选。 |
-| `rule` | string | 可选，规则关键词。 |
+| `rule` | string | 可选，规则关键词。按 `rule_hits` keyword 字段做字面量包含匹配，例如 `新IP登录` 可匹配 `新IP登录后短时间访问敏感资源`；用户输入中的 `*`、`?` 按普通字符处理，不作为通配符。 |
 | `status` | string | 可选，`new/analyzed/closed`。 |
 | `start_time` | datetime | 可选。 |
 | `end_time` | datetime | 可选。 |

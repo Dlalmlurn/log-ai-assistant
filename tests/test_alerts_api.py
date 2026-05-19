@@ -3,7 +3,12 @@ from datetime import datetime, timezone
 import pytest
 from fastapi import HTTPException
 
-from src.api.app import _build_alerts_query, app, list_alerts
+from src.api.app import (
+    _build_alerts_query,
+    _escape_elasticsearch_wildcard_value,
+    app,
+    list_alerts,
+)
 from src.config import settings
 from src.storage.elastic_client import ElasticStorage
 
@@ -70,10 +75,39 @@ def test_alerts_query_applies_documented_filters() -> None:
                 {"term": {"risk_level": "高"}},
                 {"term": {"username": "alice"}},
                 {"term": {"status": "new"}},
-                {"match_phrase": {"rule_hits": "新IP登录"}},
+                {"wildcard": {"rule_hits": {"value": "*新IP登录*"}}},
             ]
         }
     }
+
+
+def test_alerts_rule_filter_is_keyword_contains_search() -> None:
+    query = _build_alerts_query(rule="新IP登录")
+    expected_query = {
+        "bool": {
+            "filter": [
+                {"wildcard": {"rule_hits": {"value": "*新IP登录*"}}},
+            ]
+        }
+    }
+
+    assert query == expected_query
+    assert "新IP登录" in ALERT_DOC["rule_hits"][0]
+
+
+def test_alerts_rule_filter_escapes_user_wildcard_characters() -> None:
+    assert _escape_elasticsearch_wildcard_value(r"a*b?c\d") == r"a\*b\?c\\d"
+
+    query = _build_alerts_query(rule=r"a*b?c\d")
+    expected_query = {
+        "bool": {
+            "filter": [
+                {"wildcard": {"rule_hits": {"value": r"*a\*b\?c\\d*"}}},
+            ]
+        }
+    }
+
+    assert query == expected_query
 
 
 def test_alerts_query_uses_match_all_when_no_filters_are_provided() -> None:
@@ -120,7 +154,7 @@ def test_list_alerts_queries_security_alerts_with_pagination_and_filters() -> No
                         {"term": {"risk_level": "高"}},
                         {"term": {"username": "alice"}},
                         {"term": {"status": "new"}},
-                        {"match_phrase": {"rule_hits": "新IP登录"}},
+                        {"wildcard": {"rule_hits": {"value": "*新IP登录*"}}},
                     ]
                 }
             },
