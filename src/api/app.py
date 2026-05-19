@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.config import settings
 from src.health import HealthResponse, get_health_status
-from src.schemas import ErrorResponse, NormalizedLog, NormalizedLogListResponse, SourceType
+from src.schemas import AlertDetailResponse, ErrorResponse, EvidenceChain, NormalizedLog, NormalizedLogListResponse, SourceType
 from src.storage import ElasticStorage
 
 
@@ -155,6 +155,69 @@ def get_log_detail(
     return NormalizedLog(**_strip_elasticsearch_metadata(items)[0])
 
 
+@app.get(
+    "/api/v1/alerts/{alert_id}",
+    response_model=AlertDetailResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["alerts"],
+    summary="Get alert detail with evidence chain",
+    description="REQ-004, REQ-006: fetch alert, user baseline, related logs, AI report, and evidence chain from Elasticsearch.",
+)
+def get_alert_detail(
+    alert_id: str,
+    storage: ElasticStorage = Depends(get_storage),
+) -> AlertDetailResponse:
+    try:
+        alert_items, _total = storage.search_page(
+            index=settings.elasticsearch_alert_index,
+            query={"term": {"alert_id": alert_id}},
+            limit=1,
+            offset=0,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "elasticsearch_query_failed",
+                "message": "Failed to query alert detail from Elasticsearch",
+                "details": {"index": settings.elasticsearch_alert_index, "alert_id": alert_id},
+            },
+        ) from exc
+
+    if not alert_items:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "alert_not_found",
+                "message": "Alert not found",
+                "details": {"index": settings.elasticsearch_alert_index, "alert_id": alert_id},
+            },
+        )
+
+    alert = _strip_elasticsearch_metadata(alert_items)[0]
+    try:
+        baseline = _fetch_alert_baseline(storage, alert)
+        related_logs = _fetch_related_logs(storage, alert)
+        ai_report = _fetch_ai_report(storage, alert)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "elasticsearch_query_failed",
+                "message": "Failed to assemble alert evidence from Elasticsearch",
+                "details": {"alert_id": alert_id},
+            },
+        ) from exc
+
+    return AlertDetailResponse(
+        alert=alert,
+        baseline=baseline,
+        related_logs=related_logs,
+        ai_report=ai_report,
+        evidence_chain=_build_evidence_chain(alert, baseline, related_logs),
+    )
+
+
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
     return _error_response(exc.status_code, exc.detail)
@@ -245,3 +308,214 @@ def _build_logs_query(
 
 def _strip_elasticsearch_metadata(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{key: value for key, value in item.items() if key != "_id"} for item in items]
+
+
+def _fetch_alert_baseline(storage: ElasticStorage, alert: dict[str, Any]) -> dict[str, Any]:
+    username = alert.get("username")
+    if not username:
+        return {}
+
+    items, _total = storage.search_page(
+        index=settings.elasticsearch_baseline_index,
+        query={"term": {"username": username}},
+        limit=1,
+        offset=0,
+    )
+    return _strip_elasticsearch_metadata(items)[0] if items else {}
+
+
+def _fetch_related_logs(storage: ElasticStorage, alert: dict[str, Any]) -> list[dict[str, Any]]:
+    related_event_ids = _string_list(alert.get("related_event_ids"))
+    if not related_event_ids:
+        return []
+
+    items, _total = storage.search_page(
+        index=settings.elasticsearch_log_index,
+        query={"terms": {"event_id": related_event_ids}},
+        limit=len(related_event_ids),
+        offset=0,
+        sort=[{"event_time": "asc"}],
+    )
+    logs = _strip_elasticsearch_metadata(items)
+    order = {event_id: index for index, event_id in enumerate(related_event_ids)}
+    return sorted(logs, key=lambda item: order.get(str(item.get("event_id")), len(order)))
+
+
+def _fetch_ai_report(storage: ElasticStorage, alert: dict[str, Any]) -> dict[str, Any]:
+    llm_analysis_id = alert.get("llm_analysis_id")
+    if llm_analysis_id:
+        items, _total = storage.search_page(
+            index=settings.elasticsearch_ai_index,
+            query={"term": {"ai_report_id": llm_analysis_id}},
+            limit=1,
+            offset=0,
+            sort=[{"created_at": "desc"}],
+        )
+        if items:
+            return _strip_elasticsearch_metadata(items)[0]
+
+    alert_id = alert.get("alert_id")
+    if not alert_id:
+        return {}
+
+    items, _total = storage.search_page(
+        index=settings.elasticsearch_ai_index,
+        query={"term": {"alert_id": alert_id}},
+        limit=1,
+        offset=0,
+        sort=[{"created_at": "desc"}],
+    )
+    return _strip_elasticsearch_metadata(items)[0] if items else {}
+
+
+def _build_evidence_chain(alert: dict[str, Any], baseline: dict[str, Any], related_logs: list[dict[str, Any]]) -> EvidenceChain:
+    rule_hits = _string_list(alert.get("rule_hits"))
+    baseline_deviations = _extract_baseline_deviations(alert, baseline, related_logs)
+    risk_reason = _build_risk_reason(alert, rule_hits, baseline_deviations, related_logs, has_baseline=bool(baseline))
+    return EvidenceChain(
+        rule_hits=rule_hits,
+        baseline_deviations=baseline_deviations,
+        risk_reason=risk_reason,
+    )
+
+
+def _extract_baseline_deviations(
+    alert: dict[str, Any],
+    baseline: dict[str, Any],
+    related_logs: list[dict[str, Any]],
+) -> list[str]:
+    evidence = alert.get("evidence") if isinstance(alert.get("evidence"), dict) else {}
+    explicit = evidence.get("baseline_deviations")
+    if isinstance(explicit, list):
+        return [str(item) for item in explicit]
+
+    if not baseline:
+        return []
+
+    deviations: list[str] = []
+    src_ip = _first_string(evidence.get("src_ip"), evidence.get("new_ip"), alert.get("src_ip"))
+    common_ips = _string_list(baseline.get("common_ips"))
+    if src_ip and common_ips and src_ip not in common_ips:
+        deviations.append(f"src_ip {src_ip} is outside baseline common_ips")
+
+    event_hour = _event_hour(alert.get("event_time"))
+    active_hours = _string_list(baseline.get("active_hours"))
+    if event_hour is not None and active_hours and not _hour_in_ranges(event_hour, active_hours):
+        deviations.append(f"event hour {event_hour:02d}:00 is outside baseline active_hours")
+
+    resource = _first_string(evidence.get("resource"), _first_related_value(related_logs, "resource"))
+    common_resources = _string_list(baseline.get("common_resources"))
+    if resource and common_resources and resource not in common_resources:
+        deviations.append(f"resource {resource} is outside baseline common_resources")
+
+    user_agent = _first_related_value(related_logs, "user_agent")
+    common_user_agents = _string_list(baseline.get("common_user_agents"))
+    if user_agent and common_user_agents and user_agent not in common_user_agents:
+        deviations.append("user_agent is outside baseline common_user_agents")
+
+    api_calls = _numeric(evidence.get("api_calls_1m"))
+    avg_api = _numeric(baseline.get("avg_api_calls_per_minute"))
+    if api_calls is not None and avg_api is not None and api_calls > max(avg_api * 2, avg_api + 5):
+        deviations.append(f"api_calls_1m {api_calls:g} exceeds baseline avg_api_calls_per_minute {avg_api:g}")
+
+    failed_count = _numeric(evidence.get("failed_count_5m"))
+    failed_baseline = _numeric(baseline.get("failed_login_count_7d"))
+    if failed_count is not None and failed_baseline is not None and failed_count > max(3, failed_baseline):
+        deviations.append(f"failed_count_5m {failed_count:g} exceeds baseline failed_login_count_7d {failed_baseline:g}")
+
+    sensitive_count = _numeric(evidence.get("sensitive_count_5m"))
+    sensitive_rate = _numeric(baseline.get("sensitive_access_rate"))
+    if sensitive_count is not None and sensitive_count > 0 and sensitive_rate is not None and sensitive_rate < 0.1:
+        deviations.append(f"sensitive access count {sensitive_count:g} is unusual for baseline sensitive_access_rate {sensitive_rate:g}")
+
+    return deviations
+
+
+def _build_risk_reason(
+    alert: dict[str, Any],
+    rule_hits: list[str],
+    baseline_deviations: list[str],
+    related_logs: list[dict[str, Any]],
+    *,
+    has_baseline: bool,
+) -> str:
+    risk_level = alert.get("risk_level") or "unknown"
+    risk_score = alert.get("risk_score")
+    rule_text = "、".join(rule_hits) if rule_hits else "no rule hits"
+    pieces = [f"Risk level {risk_level}", f"score {risk_score}", f"rule evidence: {rule_text}"]
+    if baseline_deviations:
+        pieces.append(f"baseline deviations: {'; '.join(baseline_deviations)}")
+    elif has_baseline:
+        pieces.append("no baseline deviation was derived from the available evidence")
+    else:
+        pieces.append("baseline is missing, so the explanation relies on rule evidence only")
+    pieces.append(f"related logs: {len(related_logs)}")
+    return "; ".join(pieces)
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    if isinstance(value, tuple | set):
+        return [str(item) for item in value if item is not None]
+    return []
+
+
+def _first_string(*values: Any) -> str | None:
+    for value in values:
+        if value is not None and str(value):
+            return str(value)
+    return None
+
+
+def _first_related_value(items: list[dict[str, Any]], field: str) -> str | None:
+    for item in items:
+        value = item.get(field)
+        if value is not None and str(value):
+            return str(value)
+    return None
+
+
+def _event_hour(value: Any) -> int | None:
+    if isinstance(value, datetime):
+        return value.hour
+    if isinstance(value, str):
+        try:
+            normalized = value.replace("Z", "+00:00")
+            return datetime.fromisoformat(normalized).hour
+        except ValueError:
+            return None
+    return None
+
+
+def _hour_in_ranges(hour: int, ranges: list[str]) -> bool:
+    parsed_ranges = [_parse_hour_range(value) for value in ranges]
+    parsed_ranges = [value for value in parsed_ranges if value is not None]
+    if not parsed_ranges:
+        return True
+
+    for start, end in parsed_ranges:
+        if start <= end and start <= hour < end:
+            return True
+        if start > end and (hour >= start or hour < end):
+            return True
+    return False
+
+
+def _parse_hour_range(value: str) -> tuple[int, int] | None:
+    try:
+        start, end = value.split("-", 1)
+        return int(start.split(":", 1)[0]), int(end.split(":", 1)[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _numeric(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    try:
+        return float(str(value))
+    except ValueError:
+        return None

@@ -100,6 +100,24 @@ class AIReport(BaseModel):
     raw_response: dict[str, Any] = Field(default_factory=dict)
 
 
+class EvidenceChain(BaseModel):
+    """REQ-004/REQ-006: evidence summary for alert detail views and AI context."""
+
+    rule_hits: list[str] = Field(default_factory=list)
+    baseline_deviations: list[str] = Field(default_factory=list)
+    risk_reason: str = ""
+
+
+class AlertDetailResponse(BaseModel):
+    """REQ-004/REQ-006: composed alert detail contract from docs/05_api_contract.md."""
+
+    alert: AlertEvent
+    baseline: dict[str, Any] = Field(default_factory=dict)
+    related_logs: list[NormalizedLog] = Field(default_factory=list)
+    ai_report: dict[str, Any] = Field(default_factory=dict)
+    evidence_chain: EvidenceChain = Field(default_factory=EvidenceChain)
+
+
 class DailyReport(BaseModel):
     model_config = ConfigDict(extra="allow")
 
