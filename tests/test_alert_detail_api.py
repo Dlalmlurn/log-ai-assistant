@@ -1,6 +1,6 @@
 from fastapi import HTTPException
 
-from src.api.app import get_alert_detail
+from src.api.app import app, get_alert_detail
 from src.config import settings
 
 
@@ -186,3 +186,17 @@ def test_alert_detail_returns_clear_404_error_when_missing() -> None:
         }
     else:
         raise AssertionError("expected HTTPException")
+
+
+def test_alert_detail_openapi_binds_contract_and_error_shape() -> None:
+    operation = app.openapi()["paths"]["/api/v1/alerts/{alert_id}"]["get"]
+
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/AlertDetailResponse"
+    }
+    assert operation["responses"]["404"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
+    }
+    assert operation["responses"]["500"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
+    }

@@ -11,7 +11,16 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.config import settings
 from src.health import HealthResponse, get_health_status
-from src.schemas import AlertDetailResponse, ErrorResponse, EvidenceChain, NormalizedLog, NormalizedLogListResponse, SourceType
+from src.schemas import (
+    AlertDetailResponse,
+    ErrorResponse,
+    EvidenceChain,
+    NormalizedLog,
+    NormalizedLogListResponse,
+    SourceType,
+    UserBaseline,
+    UserBaselineListResponse,
+)
 from src.storage import ElasticStorage
 
 
@@ -216,6 +225,87 @@ def get_alert_detail(
         ai_report=ai_report,
         evidence_chain=_build_evidence_chain(alert, baseline, related_logs),
     )
+
+
+@app.get(
+    "/api/v1/baselines",
+    response_model=UserBaselineListResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["baselines"],
+    summary="Query user behavior baselines",
+    description="REQ-003, REQ-006: query user behavior baselines from Elasticsearch user-baselines for the React baseline view.",
+)
+def list_baselines(
+    limit: int = Query(default=50, ge=1),
+    offset: int = Query(default=0, ge=0),
+    storage: ElasticStorage = Depends(get_storage),
+) -> UserBaselineListResponse:
+    try:
+        items, total = storage.search_page(
+            index=settings.elasticsearch_baseline_index,
+            query={"match_all": {}},
+            limit=limit,
+            offset=offset,
+            sort=[{"updated_at": "desc"}],
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "elasticsearch_query_failed",
+                "message": "Failed to query user baselines from Elasticsearch",
+                "details": {"index": settings.elasticsearch_baseline_index},
+            },
+        ) from exc
+
+    return UserBaselineListResponse(
+        items=_strip_elasticsearch_metadata(items),
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get(
+    "/api/v1/baselines/{username}",
+    response_model=UserBaseline,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["baselines"],
+    summary="Get user behavior baseline detail",
+    description="REQ-003, REQ-006: fetch one user behavior baseline from Elasticsearch user-baselines.",
+)
+def get_baseline_detail(
+    username: str,
+    storage: ElasticStorage = Depends(get_storage),
+) -> UserBaseline:
+    try:
+        items, _total = storage.search_page(
+            index=settings.elasticsearch_baseline_index,
+            query={"term": {"username": username}},
+            limit=1,
+            offset=0,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "elasticsearch_query_failed",
+                "message": "Failed to query user baseline from Elasticsearch",
+                "details": {"index": settings.elasticsearch_baseline_index, "username": username},
+            },
+        ) from exc
+
+    if not items:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "baseline_not_found",
+                "message": "User baseline not found",
+                "details": {"index": settings.elasticsearch_baseline_index, "username": username},
+            },
+        )
+
+    return UserBaseline(**_strip_elasticsearch_metadata(items)[0])
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -456,7 +546,7 @@ def _build_risk_reason(
 def _string_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if item is not None]
-    if isinstance(value, tuple | set):
+    if isinstance(value, (tuple, set)):
         return [str(item) for item in value if item is not None]
     return []
 
@@ -513,7 +603,7 @@ def _parse_hour_range(value: str) -> tuple[int, int] | None:
 def _numeric(value: Any) -> float | None:
     if isinstance(value, bool) or value is None:
         return None
-    if isinstance(value, int | float):
+    if isinstance(value, (int, float)):
         return float(value)
     try:
         return float(str(value))
