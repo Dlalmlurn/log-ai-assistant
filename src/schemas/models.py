@@ -6,7 +6,7 @@ from typing import Any, Generic, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, Field
 
 
-RiskLevel = Literal["低", "中", "高"]
+RiskLevel = Literal["低", "中", "高", "紧急"]
 SourceType = Literal["vpn", "oa", "api", "system", "security_device"]
 ResponseItemT = TypeVar("ResponseItemT")
 

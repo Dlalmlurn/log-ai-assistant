@@ -16,8 +16,10 @@ from src.schemas import (
     BaselineRebuildResponse,
     ErrorResponse,
     EvidenceChain,
+    AlertEventListResponse,
     NormalizedLog,
     NormalizedLogListResponse,
+    RiskLevel,
     SourceType,
     UserBaseline,
     UserBaselineListResponse,
@@ -164,6 +166,59 @@ def get_log_detail(
         )
 
     return NormalizedLog(**_strip_elasticsearch_metadata(items)[0])
+
+
+@app.get(
+    "/api/v1/alerts",
+    response_model=AlertEventListResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["alerts"],
+    summary="Query security alerts",
+    description="REQ-004, REQ-006, REQ-008: query alert events from Elasticsearch security-alerts for the React abnormal event view.",
+)
+def list_alerts(
+    risk_level: RiskLevel | None = Query(default=None),
+    username: str | None = Query(default=None),
+    rule: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    start_time: datetime | None = Query(default=None),
+    end_time: datetime | None = Query(default=None),
+    limit: int = Query(default=50, ge=1),
+    offset: int = Query(default=0, ge=0),
+    storage: ElasticStorage = Depends(get_storage),
+) -> AlertEventListResponse:
+    query = _build_alerts_query(
+        risk_level=risk_level,
+        username=username,
+        rule=rule,
+        status=status,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    try:
+        items, total = storage.search_page(
+            index=settings.elasticsearch_alert_index,
+            query=query,
+            limit=limit,
+            offset=offset,
+            sort=[{"detect_time": "desc"}],
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "elasticsearch_query_failed",
+                "message": "Failed to query security alerts from Elasticsearch",
+                "details": {"index": settings.elasticsearch_alert_index},
+            },
+        ) from exc
+
+    return AlertEventListResponse(
+        items=_strip_elasticsearch_metadata(items),
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @app.get(
@@ -425,6 +480,40 @@ def _build_logs_query(
         if value is not None:
             filters.append({"term": {field: value}})
 
+    return {"bool": {"filter": filters}}
+
+
+def _build_alerts_query(
+    *,
+    risk_level: RiskLevel | None = None,
+    username: str | None = None,
+    rule: str | None = None,
+    status: str | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+) -> dict[str, Any]:
+    filters: list[dict[str, Any]] = []
+    if start_time or end_time:
+        range_filter: dict[str, str] = {}
+        if start_time:
+            range_filter["gte"] = start_time.isoformat()
+        if end_time:
+            range_filter["lte"] = end_time.isoformat()
+        filters.append({"range": {"detect_time": range_filter}})
+
+    for field, value in (
+        ("risk_level", risk_level),
+        ("username", username),
+        ("status", status),
+    ):
+        if value is not None:
+            filters.append({"term": {field: value}})
+
+    if rule:
+        filters.append({"match_phrase": {"rule_hits": rule}})
+
+    if not filters:
+        return {"match_all": {}}
     return {"bool": {"filter": filters}}
 
 

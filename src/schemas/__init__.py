@@ -12,6 +12,7 @@ from .models import (
     ListResponse,
     NormalizedLog,
     NormalizedLogListResponse,
+    RiskLevel,
     SourceType,
     UserBaseline,
     UserBaselineListResponse,
@@ -20,6 +21,7 @@ from .models import (
 __all__ = [
     "NormalizedLog",
     "SourceType",
+    "RiskLevel",
     "AlertEvent",
     "AlertDetailResponse",
     "EvidenceChain",
