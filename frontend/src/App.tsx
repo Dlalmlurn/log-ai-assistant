@@ -463,9 +463,7 @@ function RealtimeLogsPage() {
       <div className="table-toolbar">
         <div>
           <strong>{state.data?.total.toLocaleString() ?? "0"} events</strong>
-          <span>
-            Showing {query.offset + 1}-{Math.min(query.offset + query.limit, state.data?.total ?? 0)} from /api/v1/logs
-          </span>
+          <span>{formatResultRange(query.offset, query.limit, state.data?.total ?? 0, state.data?.items.length ?? 0)} from /api/v1/logs</span>
         </div>
         <div className="toolbar-meta">
           <StatusPill ok={live} label={live ? "Live polling" : "Paused"} />
@@ -747,10 +745,7 @@ function AlertsPage() {
           <div className="table-toolbar">
             <div>
               <strong>{listState.data?.total.toLocaleString() ?? "0"} alerts</strong>
-              <span>
-                Showing {listState.data?.items.length ? query.offset + 1 : 0}-
-                {Math.min(query.offset + query.limit, listState.data?.total ?? 0)} from /api/v1/alerts
-              </span>
+              <span>{formatResultRange(query.offset, query.limit, listState.data?.total ?? 0, listState.data?.items.length ?? 0)} from /api/v1/alerts</span>
             </div>
             <div className="toolbar-meta">
               <span>{listState.updatedAt ? `Updated ${listState.updatedAt.toLocaleTimeString()}` : "Waiting for data"}</span>
@@ -1061,6 +1056,9 @@ function formatError(error: unknown): string {
     return `${error.message} (${error.code})`;
   }
   if (error instanceof Error) {
+    if (error instanceof TypeError && error.message.toLowerCase().includes("fetch")) {
+      return "FastAPI request failed. Confirm the backend is running on 127.0.0.1:8000 and the Vite /api proxy is active.";
+    }
     return error.message;
   }
   return "Request failed";
@@ -1124,6 +1122,13 @@ function JsonBlock({ value }: { value: unknown }) {
 
 function isEmptyRecord(value: Record<string, unknown>): boolean {
   return Object.keys(value).length === 0;
+}
+
+function formatResultRange(offset: number, limit: number, total: number, itemCount: number): string {
+  if (itemCount === 0 || total === 0) {
+    return "Showing 0-0";
+  }
+  return `Showing ${offset + 1}-${Math.min(offset + limit, total)}`;
 }
 
 function toApiDateTime(value: string): string {
