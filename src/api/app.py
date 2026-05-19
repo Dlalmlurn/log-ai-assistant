@@ -9,13 +9,16 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from src.ai_engine import AIAnalyzer
 from src.config import settings
 from src.health import HealthResponse, get_health_status
 from src.schemas import (
+    AIReport,
     AlertDetailResponse,
     BaselineRebuildResponse,
     ErrorResponse,
     EvidenceChain,
+    AlertEvent,
     AlertEventListResponse,
     NormalizedLog,
     NormalizedLogListResponse,
@@ -70,6 +73,10 @@ def health_check() -> HealthResponse:
 # 给API接口创建并准备ElasticStorage访问对象的函数
 def get_storage() -> ElasticStorage:
     return ElasticStorage()
+
+
+def get_analyzer() -> AIAnalyzer:
+    return AIAnalyzer()
 
 
 @app.get(
@@ -282,6 +289,80 @@ def get_alert_detail(
         ai_report=ai_report,
         evidence_chain=_build_evidence_chain(alert, baseline, related_logs),
     )
+
+
+@app.post(
+    "/api/v1/alerts/{alerty_id}/analze",
+    response_model=AIReport,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["alerts"],
+    summary="Analyze an alert with AI",
+    description="REQ-004: analyze an existing alert with alert, baseline, related_logs, and window_stats context, then store the AI report in Elasticsearch ai-reports.",
+)
+def analyze_alert(
+    alert_id: str,
+    storage: ElasticStorage = Depends(get_storage),
+    analyzer: AIAnalyzer = Depends(get_analyzer),
+) -> AIReport:
+    try:
+        alert_items, _total = storage.search_page(
+            index=settings.elasticsearch_alert_index,
+            query={"term": {"alert_id": alert_id}},
+            limit=1,
+            offset=0,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "elasticsearch_query_failed",
+                "message": "Failed to query alert for AI analysis",
+                "details": {"index": settings.elasticsearch_alert_index, "alert_id": alert_id},
+            },
+        ) from exc
+
+    if not alert_items:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "alert_not_found",
+                "message": "Alert not found",
+                "details": {"index": settings.elasticsearch_alert_index, "alert_id": alert_id},
+            },
+        )
+
+    alert = _strip_elasticsearch_metadata(alert_items)[0]
+    try:
+        baseline = _fetch_alert_baseline(storage, alert)
+        related_logs = _fetch_related_logs(storage, alert)
+        report = analyzer.analyze(
+            alert=AlertEvent.model_validate(alert),
+            baseline=baseline,
+            related_logs=related_logs,
+            window_stats={},
+        )
+        report_doc = report.model_dump(mode="json")
+        storage.index_document(settings.elasticsearch_ai_index, report_doc, doc_id=report.ai_report_id)
+        storage.update_document(
+            settings.elasticsearch_alert_index,
+            alert_id,
+            {"llm_analysis_id": report.ai_report_id, "status": "analyzed"},
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "alert_analysis_failed",
+                "message": "Failed to analyze alert and store AI report",
+                "details": {
+                    "alert_id": alert_id,
+                    "ai_index": settings.elasticsearch_ai_index,
+                    "alert_index": settings.elasticsearch_alert_index,
+                },
+            },
+        ) from exc
+
+    return report
 
 
 @app.get(

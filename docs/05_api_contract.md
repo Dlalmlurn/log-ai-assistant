@@ -104,6 +104,25 @@
 }
 ```
 
+### AI Analyze Response
+
+`POST /api/v1/alerts/{alert_id}/analyze` 无请求体。后端必须读取告警、用户 baseline 和相关日志作为上下文，调用 AI analyzer 后将报告写入 ES `ai-reports`，并更新原告警的 `llm_analysis_id` 和 `status=analyzed`。
+
+```json
+{
+  "ai_report_id": "ai-1",
+  "alert_id": "alert-1",
+  "created_at": "2026-05-13T10:03:00Z",
+  "attack_type": "账号接管",
+  "risk_level": "高",
+  "reason": "New IP followed by export.",
+  "suggestion": "Review account activity.",
+  "confidence": 0.9,
+  "next_steps": ["disable session"],
+  "raw_response": {}
+}
+```
+
 ### Baseline Rebuild Response
 
 ```json
