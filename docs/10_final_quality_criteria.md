@@ -13,6 +13,17 @@
 - [ ] FastAPI 不把底层表结构作为前端依赖。
 - [ ] Python Producer 和前端 mock 数据只作为调试工具。
 
+## 运行环境标准
+
+- [ ] Docker Compose 是正式运行环境基线。
+- [ ] 开发者本机只要求 Git、Docker、编辑器和浏览器。
+- [ ] 本机不要求安装 Miniconda、Python、Node、Flink、Kafka、ClickHouse 或 Filebeat。
+- [ ] `cp .env.example .env` 后，`docker compose up --build` 能启动主要运行依赖。
+- [ ] backend 和 frontend 均作为 Compose service 运行。
+- [ ] 默认日志生成器为小流量开发配置。
+- [ ] 1GB/day 或更大规模生成通过 Compose profile 显式启用。
+- [ ] 测试入口可通过 `docker compose run --rm tester` 执行。
+
 ## 数据规模标准
 
 - [ ] 每日原始增量日志不少于 1GB。

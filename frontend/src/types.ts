@@ -4,7 +4,7 @@ export type RiskLevel = "低" | "中" | "高" | "紧急";
 export type HealthResponse = {
   kafka: boolean;
   flink: boolean;
-  elasticsearch: boolean;
+  clickhouse: boolean;
   dashscope_configured: boolean;
   latest_log_ingest_time: string | null;
   consumer_lag: Record<string, number>;

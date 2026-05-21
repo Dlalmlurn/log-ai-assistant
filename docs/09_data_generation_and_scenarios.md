@@ -41,6 +41,14 @@
 
 正式采集入口仍然是 Filebeat。Python Producer 只作为辅助工具。
 
+日常 Docker Compose 默认启动小规模持续日志生成，用于开发和链路联调。默认启动不得生成 1GB/day，以免压垮普通开发机。
+
+1GB/day 或更高规模数据生成属于规模 profile，必须通过类似以下命令显式启用：
+
+```bash
+docker compose --profile scale up --build
+```
+
 ## 日志生成原则
 
 日志生成器必须模拟企业环境中的长期行为，而不是随机生成互不相关的样例。

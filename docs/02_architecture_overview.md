@@ -16,6 +16,21 @@
 
 ClickHouse 是唯一主存储和分析引擎。
 
+## 正式运行环境
+
+正式运行环境由 Docker Compose 管理。项目运行所需的 Kafka、Flink、ClickHouse、Filebeat、FastAPI、React 和 log-generator 均应作为 Compose service 或 profile service 存在。
+
+开发者本机不承担 Python、Node、Flink、Kafka、ClickHouse、Filebeat 或 Miniconda 运行时要求。本机只需要 Git、Docker、编辑器和浏览器。
+
+默认启动入口为：
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+大规模日志生成、Flink 作业提交和测试入口可以通过 Compose profile 或 `docker compose run` 单独执行，但不能要求组员在本机直接安装 PyFlink、Node 或 Python 依赖。
+
 ## 组件职责
 
 | 组件 | 职责 | 不负责 |

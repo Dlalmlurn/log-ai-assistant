@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 import requests
 from pydantic import BaseModel, Field
 
@@ -10,14 +8,14 @@ from src.config import settings
 
 CONSUMER_GROUP_TOPICS: dict[str, list[str]] = {
     "flink-raw-to-parsed": [settings.kafka_raw_topic],
-    "log-ai-consume-to-es": [settings.kafka_parsed_topic, settings.kafka_alert_topic],
+    "flink-parsed-to-clickhouse": [settings.kafka_parsed_topic],
 }
 
 
 class HealthResponse(BaseModel):
     kafka: bool
     flink: bool
-    elasticsearch: bool
+    clickhouse: bool
     dashscope_configured: bool
     latest_log_ingest_time: str | None = None
     consumer_lag: dict[str, int] = Field(default_factory=dict)
@@ -26,12 +24,12 @@ class HealthResponse(BaseModel):
 def get_health_status() -> HealthResponse:
     """REQ-001/REQ-002/REQ-007: expose formal pipeline health to the API layer."""
     kafka_ok = _check_kafka()
-    elasticsearch_ok, latest_log_ingest_time = _check_elasticsearch()
+    clickhouse_ok, latest_log_ingest_time = _check_clickhouse()
 
     return HealthResponse(
         kafka=kafka_ok,
         flink=_check_flink(),
-        elasticsearch=elasticsearch_ok,
+        clickhouse=clickhouse_ok,
         dashscope_configured=bool(settings.dashscope_api_key),
         latest_log_ingest_time=latest_log_ingest_time,
         consumer_lag=_get_consumer_lag() if kafka_ok else _empty_consumer_lag(),
@@ -43,7 +41,7 @@ def get_cli_health_payload() -> dict[str, object]:
     status = get_health_status()
     return {
         "kafka": status.kafka,
-        "elasticsearch": status.elasticsearch,
+        "clickhouse": status.clickhouse,
         "flink": status.flink,
         "dashscope_configured": status.dashscope_configured,
         "last_data_update": status.latest_log_ingest_time or "N/A",
@@ -72,33 +70,16 @@ def _check_kafka() -> bool:
         return False
 
 
-def _check_elasticsearch() -> tuple[bool, str | None]:
+def _check_clickhouse() -> tuple[bool, str | None]:
     try:
-        from src.storage import ElasticStorage
+        from src.storage import ClickHouseStorage
 
-        storage = ElasticStorage()
-        elasticsearch_ok = storage.health()
-        latest_log_ingest_time = _fetch_latest_log_ingest_time(storage) if elasticsearch_ok else None
-        return elasticsearch_ok, latest_log_ingest_time
+        storage = ClickHouseStorage()
+        clickhouse_ok = storage.health()
+        latest_log_ingest_time = storage.latest_security_log_ingest_time() if clickhouse_ok else None
+        return clickhouse_ok, latest_log_ingest_time
     except Exception:
         return False, None
-
-
-def _fetch_latest_log_ingest_time(storage: Any) -> str | None:
-    try:
-        latest = storage.search(
-            settings.elasticsearch_log_index,
-            query={"match_all": {}},
-            size=1,
-            sort=[{"ingest_time": "desc"}],
-        )
-    except Exception:
-        return None
-
-    if not latest:
-        return None
-    value = latest[0].get("ingest_time")
-    return str(value) if value else None
 
 
 def _check_flink() -> bool:

@@ -36,6 +36,23 @@ ClickHouse 是唯一主存储和分析引擎。
 
 Elasticsearch 不作为运行时依赖。主线代码不继续新增 Elasticsearch sink、index、query adapter 或以 Elasticsearch 为核心的数据契约。
 
+## 正式运行环境
+
+项目正式运行环境以 Docker Compose 为基准。
+
+开发者本机只要求安装 Git、Docker、编辑器和浏览器。不要求本机安装 Miniconda、Python、Node、Flink、Kafka、ClickHouse 或 Filebeat。
+
+Python、Node、Flink、Kafka、ClickHouse、Filebeat、FastAPI、React 和日志生成器等运行依赖由 Docker Compose 管理。本地 Python、Node 或 Conda 环境只能作为个人开发便利，不能写入正式运行要求。
+
+日常开发入口是：
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+默认日志生成器只生成小规模持续日志，用于日常开发。1GB/day 或更高规模数据生成必须通过 Docker Compose profile 显式启用，不能作为默认启动行为。
+
 ## 需求基线
 
 | ID | 原始要求 | 项目能力 | 目标状态 |
@@ -59,6 +76,7 @@ Elasticsearch 不作为运行时依赖。主线代码不继续新增 Elasticsear
 | 主存储 | ClickHouse 存储结构化日志、用户特征、baseline、异常事件、AI 研判、AI 反馈和日报数据。 |
 | 后端 API | FastAPI 对外提供查询、分析、状态、AI 研判和反馈接口。 |
 | 前端展示 | React + TypeScript + Vite 构建安全运营工作台。 |
+| 运行环境 | Docker Compose 是正式运行环境基线，本机不要求 Miniconda、Python、Node 或中间件运行时。 |
 | 行为建模 | 优先基于历史数据 T+1 建模，不在实时流中硬编码 baseline。 |
 | 异常输出 | 规则检测、窗口统计和 baseline 偏离必须统一产出 `AnomalyEvent`。 |
 | 风险等级 | 内部统一使用 `low`, `medium`, `high`, `critical`，前端可映射为中文展示。 |

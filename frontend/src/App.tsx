@@ -115,7 +115,7 @@ function App() {
           <span>Filebeat</span>
           <span>Kafka</span>
           <span>Flink</span>
-          <span>Elasticsearch</span>
+          <span>ClickHouse</span>
           <span>FastAPI</span>
           <span>React</span>
         </div>
@@ -183,9 +183,9 @@ function SystemStatusPage() {
         icon: Activity
       },
       {
-        name: "Elasticsearch",
-        ok: health?.elasticsearch ?? false,
-        description: "security-logs persistence and search",
+        name: "ClickHouse",
+        ok: health?.clickhouse ?? false,
+        description: "security_logs persistence and analytics",
         icon: Database
       },
       {
@@ -198,7 +198,7 @@ function SystemStatusPage() {
   }, [state.data]);
 
   const onlineCount = services.filter((service) => service.ok).length;
-  const pipelineReady = state.data ? state.data.kafka && state.data.flink && state.data.elasticsearch : false;
+  const pipelineReady = state.data ? state.data.kafka && state.data.flink && state.data.clickhouse : false;
 
   return (
     <section className="page">
@@ -236,7 +236,7 @@ function SystemStatusPage() {
           icon={Clock3}
           label="Latest ingest"
           value={formatDateTime(state.data?.latest_log_ingest_time)}
-          hint="Most recent security-logs ingest_time"
+          hint="Most recent security_logs ingest_time"
         />
         <Metric
           icon={ListFilter}
@@ -349,7 +349,7 @@ function RealtimeLogsPage() {
       <PageHeader
         kicker="REQ-002 / REQ-006"
         title="Realtime Logs"
-        description="Structured events queried from FastAPI, backed by Elasticsearch security-logs."
+        description="Structured events queried through FastAPI from the ClickHouse-backed runtime path."
         action={
           <div className="header-actions">
             <button className="icon-button" type="button" onClick={() => setLive((value) => !value)}>
@@ -512,7 +512,7 @@ function RealtimeLogsPage() {
 
         {state.loading && !state.data ? <TableSkeleton /> : null}
         {!state.loading && state.data?.items.length === 0 ? (
-          <EmptyState title="No logs matched" detail="Adjust filters or confirm that Filebeat, Flink, and Elasticsearch are moving current data." />
+          <EmptyState title="No logs matched" detail="Adjust filters or confirm that Filebeat, Flink, and ClickHouse are moving current data." />
         ) : null}
       </div>
 
@@ -635,7 +635,7 @@ function AlertsPage() {
       <PageHeader
         kicker="REQ-004 / REQ-006 / REQ-008"
         title="Alerts"
-        description="Abnormal events queried from FastAPI, backed by Elasticsearch security-alerts and related evidence."
+        description="Abnormal events queried through FastAPI from the formal ClickHouse target path."
         action={
           <button className="icon-button primary" type="button" onClick={() => loadAlerts(query)} disabled={listState.loading}>
             <RefreshCcw aria-hidden="true" className={listState.loading ? "spin" : ""} />
@@ -803,7 +803,7 @@ function AlertsPage() {
 
             {listState.loading && !listState.data ? <TableSkeleton /> : null}
             {!listState.loading && listState.data?.items.length === 0 ? (
-              <EmptyState title="No alerts matched" detail="Adjust filters or confirm that the detection pipeline has written security-alerts." />
+              <EmptyState title="No alerts matched" detail="Adjust filters or confirm that the detection pipeline has written anomaly events." />
             ) : null}
           </div>
 
