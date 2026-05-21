@@ -57,6 +57,8 @@ cp .env.example .env
 docker compose up --build
 ```
 
+如果宿主机配置的 Docker Hub 镜像源不可用，构建可能在 `python:3.11-slim`、`node:20-alpine` 等基础镜像 metadata 阶段失败。此时在 `.env` 中把 `PYTHON_BASE_IMAGE`、`NODE_BASE_IMAGE` 或 `KAFKA_IMAGE`、`CLICKHOUSE_IMAGE`、`FLINK_IMAGE`、`FILEBEAT_IMAGE` 改为当前网络可访问的镜像地址，或改为本机已预拉取并重新 tag 的镜像名。
+
 默认 Compose 会拉起当前正式运行基线中的主要服务：
 
 | 服务 | 作用 | 默认访问 |

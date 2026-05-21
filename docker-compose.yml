@@ -1,6 +1,6 @@
 services:
   kafka:
-    image: apache/kafka:3.7.0
+    image: ${KAFKA_IMAGE:-apache/kafka:3.7.0}
     container_name: kafka
     ports:
       - "${KAFKA_HOST_PORT:-9092}:29092"
@@ -31,7 +31,7 @@ services:
       retries: 10
 
   kafka-init:
-    image: apache/kafka:3.7.0
+    image: ${KAFKA_IMAGE:-apache/kafka:3.7.0}
     container_name: kafka-init
     depends_on:
       kafka:
@@ -50,7 +50,7 @@ services:
     command: ["/bin/bash", "/opt/app/scripts/create_kafka_topics.sh"]
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24.8
+    image: ${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:24.8}
     container_name: clickhouse
     ports:
       - "${CLICKHOUSE_HTTP_HOST_PORT:-8123}:8123"
@@ -70,7 +70,7 @@ services:
       retries: 12
 
   flink-jobmanager:
-    image: flink:1.18.1
+    image: ${FLINK_IMAGE:-flink:1.18.1}
     container_name: flink-jobmanager
     command: jobmanager
     ports:
@@ -87,7 +87,7 @@ services:
       retries: 10
 
   flink-taskmanager:
-    image: flink:1.18.1
+    image: ${FLINK_IMAGE:-flink:1.18.1}
     container_name: flink-taskmanager
     command: taskmanager
     depends_on:
@@ -100,7 +100,7 @@ services:
         taskmanager.memory.process.size: 2048m
 
   filebeat:
-    image: docker.elastic.co/beats/filebeat:8.13.4
+    image: ${FILEBEAT_IMAGE:-docker.elastic.co/beats/filebeat:8.13.4}
     container_name: filebeat
     user: root
     command: ["--strict.perms=false"]
@@ -117,6 +117,8 @@ services:
     build:
       context: .
       dockerfile: docker/backend.Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
     container_name: log-ai-backend
     environment:
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS_DOCKER:-kafka:9092}
@@ -156,6 +158,8 @@ services:
     build:
       context: .
       dockerfile: docker/frontend.Dockerfile
+      args:
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-node:20-alpine}
     container_name: log-ai-frontend
     environment:
       VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
@@ -177,6 +181,8 @@ services:
     build:
       context: .
       dockerfile: docker/log-generator.Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
     container_name: log-generator
     environment:
       LOG_GENERATOR_OUTPUT: ${LOG_GENERATOR_OUTPUT:-/var/log/app/vpn_logs.log}
@@ -190,6 +196,8 @@ services:
     build:
       context: .
       dockerfile: docker/log-generator.Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
     container_name: log-generator-scale
     profiles: ["scale"]
     environment:
@@ -201,7 +209,7 @@ services:
       - ./logs:/var/log/app
 
   flink-submit:
-    image: flink:1.18.1
+    image: ${FLINK_IMAGE:-flink:1.18.1}
     container_name: flink-submit
     profiles: ["jobs"]
     working_dir: /opt/app
@@ -234,6 +242,8 @@ services:
     build:
       context: .
       dockerfile: docker/tester.Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
     container_name: log-ai-tester
     profiles: ["test"]
     environment:
@@ -251,7 +261,7 @@ services:
     command: ["pytest", "-q"]
 
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    image: ${ELASTICSEARCH_IMAGE:-docker.elastic.co/elasticsearch/elasticsearch:8.13.4}
     container_name: elasticsearch
     profiles: ["legacy-es"]
     ports:
@@ -270,7 +280,7 @@ services:
       retries: 10
 
   kibana:
-    image: docker.elastic.co/kibana/kibana:8.13.4
+    image: ${KIBANA_IMAGE:-docker.elastic.co/kibana/kibana:8.13.4}
     container_name: kibana
     profiles: ["legacy-es"]
     ports:
