@@ -34,6 +34,13 @@ class Settings:
     kafka_ai_topic: str
     kafka_metrics_topic: str
 
+    clickhouse_host: str
+    clickhouse_http_port: int
+    clickhouse_native_port: int
+    clickhouse_database: str
+    clickhouse_user: str
+    clickhouse_password: str
+
     elasticsearch_url: str
     elasticsearch_log_index: str
     elasticsearch_alert_index: str
@@ -45,6 +52,8 @@ class Settings:
 
     dashscope_api_key: str
     dashscope_model: str
+
+    backend_cors_origins: list[str]
 
     generator_script: Path
     generator_jsonl: Path
@@ -67,6 +76,12 @@ settings = Settings(
     kafka_alert_topic=os.getenv("KAFKA_ALERT_TOPIC", "alert_events"),
     kafka_ai_topic=os.getenv("KAFKA_AI_TOPIC", "ai_reports"),
     kafka_metrics_topic=os.getenv("KAFKA_METRICS_TOPIC", "system_metrics"),
+    clickhouse_host=os.getenv("CLICKHOUSE_HOST", "localhost"),
+    clickhouse_http_port=_get_int("CLICKHOUSE_HTTP_PORT", 8123),
+    clickhouse_native_port=_get_int("CLICKHOUSE_NATIVE_PORT", 9000),
+    clickhouse_database=os.getenv("CLICKHOUSE_DATABASE", "log_ai"),
+    clickhouse_user=os.getenv("CLICKHOUSE_USER", "default"),
+    clickhouse_password=os.getenv("CLICKHOUSE_PASSWORD", ""),
     elasticsearch_url=os.getenv("ELASTICSEARCH_URL", "http://localhost:9200"),
     elasticsearch_log_index=os.getenv("ELASTICSEARCH_LOG_INDEX", "security-logs"),
     elasticsearch_alert_index=os.getenv("ELASTICSEARCH_ALERT_INDEX", "security-alerts"),
@@ -76,6 +91,7 @@ settings = Settings(
     flink_dashboard_url=os.getenv("FLINK_DASHBOARD_URL", "http://localhost:8081"),
     dashscope_api_key=os.getenv("DASHSCOPE_API_KEY", ""),
     dashscope_model=os.getenv("DASHSCOPE_MODEL", "qwen-plus"),
+    backend_cors_origins=_get_csv("BACKEND_CORS_ORIGINS", "http://localhost:5173"),
     generator_script=(PROJECT_ROOT / os.getenv("GENERATOR_SCRIPT", "log-generator/gen_vpn_logs.py")).resolve(),
     generator_jsonl=(PROJECT_ROOT / os.getenv("GENERATOR_JSONL", "log-generator/vpn_output/vpn_logs.jsonl")).resolve(),
     generator_syslog=(PROJECT_ROOT / os.getenv("GENERATOR_SYSLOG", "log-generator/vpn_output/vpn_logs.log")).resolve(),

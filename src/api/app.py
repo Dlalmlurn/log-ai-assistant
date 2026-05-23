@@ -7,6 +7,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.ai_engine import AIAnalyzer
@@ -59,7 +60,15 @@ HTTP_ERROR_CODES = {
 app = FastAPI(
     title="Log AI Assistant API",
     version="0.1.0",
-    description="FastAPI layer for the formal Filebeat -> Kafka -> Flink -> Elasticsearch -> FastAPI -> React path.",
+    description="FastAPI layer for the formal Filebeat -> Kafka -> Flink -> ClickHouse -> FastAPI -> React path.",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.backend_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -69,7 +78,7 @@ app = FastAPI(
     responses=STANDARD_ERROR_RESPONSES,
     tags=["system"],
     summary="System health status",
-    description="REQ-001, REQ-002, REQ-007: report Kafka, Flink, Elasticsearch, DashScope config, latest log ingest time, and consumer lag.",
+    description="REQ-001, REQ-002, REQ-007: report Kafka, Flink, ClickHouse, DashScope config, latest log ingest time, and consumer lag.",
 )
 def health_check() -> HealthResponse:
     return get_health_status()
@@ -89,7 +98,7 @@ def get_analyzer() -> AIAnalyzer:
     responses=STANDARD_ERROR_RESPONSES,
     tags=["logs"],
     summary="Query structured security logs",
-    description="REQ-002, REQ-006: query normalized logs from Elasticsearch security-logs for the React realtime log view.",
+    description="REQ-002, REQ-006: query normalized logs for the React realtime log view.",
 )
 def list_logs(
     source_type: SourceType | None = Query(default=None),
@@ -143,7 +152,7 @@ def list_logs(
     responses=STANDARD_ERROR_RESPONSES,
     tags=["logs"],
     summary="Get structured security log detail",
-    description="REQ-002, REQ-006: fetch one normalized log by event_id from Elasticsearch security-logs.",
+    description="REQ-002, REQ-006: fetch one normalized log by event_id.",
 )
 def get_log_detail(
     event_id: str,
@@ -185,7 +194,7 @@ def get_log_detail(
     responses=STANDARD_ERROR_RESPONSES,
     tags=["alerts"],
     summary="Query security alerts",
-    description="REQ-004, REQ-006, REQ-008: query alert events from Elasticsearch security-alerts for the React abnormal event view.",
+    description="REQ-004, REQ-006, REQ-008: query alert events for the React abnormal event view.",
 )
 def list_alerts(
     risk_level: RiskLevel | None = Query(default=None),
@@ -238,7 +247,7 @@ def list_alerts(
     responses=STANDARD_ERROR_RESPONSES,
     tags=["alerts"],
     summary="Get alert detail with evidence chain",
-    description="REQ-004, REQ-006: fetch alert, user baseline, related logs, AI report, and evidence chain from Elasticsearch.",
+    description="REQ-004, REQ-006: fetch alert, user baseline, related logs, AI report, and evidence chain.",
 )
 def get_alert_detail(
     alert_id: str,
@@ -301,7 +310,7 @@ def get_alert_detail(
     responses=STANDARD_ERROR_RESPONSES,
     tags=["alerts"],
     summary="Analyze an alert with AI",
-    description="REQ-004: analyze an existing alert with alert, baseline, related_logs, and window_stats context, then store the AI report in Elasticsearch ai-reports.",
+    description="REQ-004: analyze an existing alert with alert, baseline, related_logs, and window_stats context, then store the AI report.",
 )
 def analyze_alert(
     alert_id: str,
@@ -375,7 +384,7 @@ def analyze_alert(
     responses=STANDARD_ERROR_RESPONSES,
     tags=["baselines"],
     summary="Query user behavior baselines",
-    description="REQ-003, REQ-006: query user behavior baselines from Elasticsearch user-baselines for the React baseline view.",
+    description="REQ-003, REQ-006: query user behavior baselines for the React baseline view.",
 )
 def list_baselines(
     limit: int = Query(default=50, ge=1),
@@ -414,7 +423,7 @@ def list_baselines(
     responses=STANDARD_ERROR_RESPONSES,
     tags=["baselines"],
     summary="Rebuild user behavior baselines",
-    description="REQ-003: rebuild user behavior baselines from Elasticsearch security-logs and store them in user-baselines.",
+    description="REQ-003: rebuild user behavior baselines from stored security logs.",
 )
 def rebuild_baselines(
     storage: ElasticStorage = Depends(get_storage),
@@ -444,7 +453,7 @@ def rebuild_baselines(
     responses=STANDARD_ERROR_RESPONSES,
     tags=["baselines"],
     summary="Get user behavior baseline detail",
-    description="REQ-003, REQ-006: fetch one user behavior baseline from Elasticsearch user-baselines.",
+    description="REQ-003, REQ-006: fetch one user behavior baseline.",
 )
 def get_baseline_detail(
     username: str,
@@ -486,7 +495,7 @@ def get_baseline_detail(
     responses=STANDARD_ERROR_RESPONSES,
     tags=["ai-reports"],
     summary="Query AI analysis reports",
-    description="REQ-004, REQ-006: query AI analysis reports from Elasticsearch ai-reports for the React AI analysis view.",
+    description="REQ-004, REQ-006: query AI analysis reports for the React AI analysis view.",
 )
 def list_ai_reports(
     limit: int = Query(default=50, ge=1),
@@ -525,7 +534,7 @@ def list_ai_reports(
     responses=STANDARD_ERROR_RESPONSES,
     tags=["daily-reports"],
     summary="Query daily security reports",
-    description="REQ-005, REQ-006: query daily security posture reports from Elasticsearch daily-reports.",
+    description="REQ-005, REQ-006: query daily security posture reports.",
 )
 def list_daily_reports(
     limit: int = Query(default=50, ge=1),
@@ -564,7 +573,7 @@ def list_daily_reports(
     responses=STANDARD_ERROR_RESPONSES,
     tags=["daily-reports"],
     summary="Generate a daily security report",
-    description="REQ-005: generate a daily security posture report for the specified date and store it in Elasticsearch daily-reports.",
+    description="REQ-005: generate a daily security posture report for the specified date.",
 )
 def create_daily_report(
     date: str | None = Query(default=None, description="Date in YYYY-MM-DD format. Defaults to today (UTC)."),

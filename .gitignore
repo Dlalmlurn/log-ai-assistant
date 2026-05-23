@@ -49,3 +49,4 @@ log-generator/vpn_output/*.log
 
 # Codex development loop state
 .codex-loop/
+project__notes/development/阶段化开发任务.md
