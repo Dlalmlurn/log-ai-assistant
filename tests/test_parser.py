@@ -14,9 +14,9 @@ def test_parse_generator_json_line() -> None:
 
     out = normalize_raw_record(line)
     assert out.source_type == "vpn"
-    assert out.username == "wang.jian"
+    assert out.user_id == "wang.jian"
     assert out.action == "login"
-    assert out.status == "success"
+    assert out.result == "success"
     assert out.src_ip == "101.89.15.190"
     assert out.dst_ip == "10.2.140.10"
     assert out.trace_id == "639174A3-EB41-4B"
@@ -32,8 +32,8 @@ def test_parse_syslog_line() -> None:
     )
 
     out = normalize_raw_record(line)
-    assert out.username == "admin"
-    assert out.status == "failed"
+    assert out.user_id == "admin"
+    assert out.result == "fail"
     assert out.action == "login"
     assert out.src_ip == "185.220.101.8"
     assert "境外登录(荷兰)" in out.risk_tags

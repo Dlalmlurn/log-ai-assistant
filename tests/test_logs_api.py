@@ -21,15 +21,17 @@ class FakeLogStorage:
                     "event_id": "evt-1",
                     "event_time": "2026-05-13T10:00:00Z",
                     "ingest_time": "2026-05-13T10:00:05Z",
+                    "tenant_id": "default",
                     "source_type": "vpn",
-                    "username": "alice",
+                    "log_type": "login",
+                    "user_id": "alice",
                     "src_ip": "10.0.0.7",
                     "action": "login",
-                    "status": "failed",
+                    "result": "fail",
                     "message": "VPN login failed",
-                    "raw_message": "raw vpn line",
+                    "raw_log": "raw vpn line",
                     "risk_tags": [],
-                    "original_fields": {"vpn_result": "bad_password"},
+                    "attrs": {"vpn_result": "bad_password"},
                 }
             ],
             7,
@@ -52,9 +54,9 @@ def test_logs_query_applies_documented_filters() -> None:
 
     response = list_logs(
         source_type="vpn",
-        username="alice",
+        user_id="alice",
         src_ip="10.0.0.7",
-        status="failed",
+        result="fail",
         start_time=start,
         end_time=end,
         limit=25,
@@ -65,7 +67,7 @@ def test_logs_query_applies_documented_filters() -> None:
     item = response.model_dump(mode="json")["items"][0]
 
     assert item["event_id"] == "evt-1"
-    assert item["original_fields"] == {"vpn_result": "bad_password"}
+    assert item["attrs"] == {"vpn_result": "bad_password"}
     assert "_id" not in item
     assert response.total == 7
     assert response.limit == 25
@@ -80,15 +82,17 @@ def test_log_detail_queries_security_logs_by_event_id() -> None:
                 "event_id": "evt-1",
                 "event_time": "2026-05-13T10:00:00Z",
                 "ingest_time": "2026-05-13T10:00:05Z",
+                "tenant_id": "default",
                 "source_type": "vpn",
-                "username": "alice",
+                "log_type": "login",
+                "user_id": "alice",
                 "src_ip": "10.0.0.7",
                 "action": "login",
-                "status": "success",
+                "result": "success",
                 "message": "VPN login success",
-                "raw_message": "raw vpn line",
+                "raw_log": "raw vpn line",
                 "risk_tags": [],
-                "original_fields": {"vpn_result": "ok"},
+                "attrs": {"vpn_result": "ok"},
             }
         ]
     )
@@ -97,7 +101,7 @@ def test_log_detail_queries_security_logs_by_event_id() -> None:
     item = response.model_dump(mode="json")
 
     assert item["event_id"] == "evt-1"
-    assert item["original_fields"] == {"vpn_result": "ok"}
+    assert item["attrs"] == {"vpn_result": "ok"}
     assert "_id" not in item
     assert storage.calls == [
         {
@@ -131,9 +135,9 @@ def test_logs_endpoint_queries_security_logs_with_pagination_and_filters() -> No
 
     list_logs(
         source_type="vpn",
-        username="alice",
+        user_id="alice",
         src_ip="10.0.0.7",
-        status="failed",
+        result="fail",
         start_time=start,
         end_time=end,
         limit=25,
@@ -156,9 +160,9 @@ def test_logs_endpoint_queries_security_logs_with_pagination_and_filters() -> No
                             }
                         },
                         {"term": {"source_type": "vpn"}},
-                        {"term": {"username": "alice"}},
+                        {"term": {"user_id": "alice"}},
                         {"term": {"src_ip": "10.0.0.7"}},
-                        {"term": {"status": "failed"}},
+                        {"term": {"result": "fail"}},
                     ]
                 }
             },

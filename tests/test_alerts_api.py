@@ -15,20 +15,24 @@ from src.storage.elastic_client import ElasticStorage
 
 ALERT_DOC = {
     "_id": "alert-doc-1",
-    "alert_id": "alert-1",
+    "event_id": "anom-1",
     "event_time": "2026-05-13T10:00:00Z",
     "detect_time": "2026-05-13T10:00:10Z",
-    "username": "alice",
+    "tenant_id": "default",
+    "user_id": "alice",
     "src_ip": "203.0.113.9",
     "source_type": "vpn",
-    "risk_level": "高",
+    "risk_level": "high",
     "risk_score": 90,
+    "risk_components": {"rule_score": 90},
     "rule_hits": ["新IP登录后短时间访问敏感资源"],
-    "evidence": {"username": "alice", "src_ip": "203.0.113.9", "resource": "/api/export"},
+    "baseline_deviations": [],
+    "reason_codes": ["new_source_then_sensitive_access"],
+    "evidence": {"user_id": "alice", "src_ip": "203.0.113.9", "resource": "/api/export"},
     "related_event_ids": ["evt-login", "evt-export"],
-    "related_logs_summary": "user=alice src_ip=203.0.113.9 action=api_call",
+    "ai_status": "not_required",
     "status": "new",
-    "llm_analysis_id": None,
+    "created_at": "2026-05-13T10:00:10Z",
 }
 
 
@@ -53,8 +57,8 @@ def test_alerts_query_applies_documented_filters() -> None:
     end = datetime(2026, 5, 13, 10, 0, tzinfo=timezone.utc)
 
     query = _build_alerts_query(
-        risk_level="高",
-        username="alice",
+        risk_level="high",
+        user_id="alice",
         rule="新IP登录",
         status="new",
         start_time=start,
@@ -72,8 +76,8 @@ def test_alerts_query_applies_documented_filters() -> None:
                         }
                     }
                 },
-                {"term": {"risk_level": "高"}},
-                {"term": {"username": "alice"}},
+                {"term": {"risk_level": "high"}},
+                {"term": {"user_id": "alice"}},
                 {"term": {"status": "new"}},
                 {"wildcard": {"rule_hits": {"value": "*新IP登录*"}}},
             ]
@@ -120,8 +124,8 @@ def test_list_alerts_queries_security_alerts_with_pagination_and_filters() -> No
     end = datetime(2026, 5, 13, 10, 0, tzinfo=timezone.utc)
 
     response = list_alerts(
-        risk_level="高",
-        username="alice",
+        risk_level="high",
+        user_id="alice",
         rule="新IP登录",
         status="new",
         start_time=start,
@@ -132,7 +136,7 @@ def test_list_alerts_queries_security_alerts_with_pagination_and_filters() -> No
     )
     payload = response.model_dump(mode="json")
 
-    assert payload["items"][0]["alert_id"] == "alert-1"
+    assert payload["items"][0]["event_id"] == "anom-1"
     assert "_id" not in payload["items"][0]
     assert response.total == 7
     assert response.limit == 25
@@ -151,8 +155,8 @@ def test_list_alerts_queries_security_alerts_with_pagination_and_filters() -> No
                                 }
                             }
                         },
-                        {"term": {"risk_level": "高"}},
-                        {"term": {"username": "alice"}},
+                        {"term": {"risk_level": "high"}},
+                        {"term": {"user_id": "alice"}},
                         {"term": {"status": "new"}},
                         {"wildcard": {"rule_hits": {"value": "*新IP登录*"}}},
                     ]
@@ -166,11 +170,11 @@ def test_list_alerts_queries_security_alerts_with_pagination_and_filters() -> No
 
 
 def test_list_alerts_allows_emergency_risk_level() -> None:
-    storage = FakeAlertStorage(items=[ALERT_DOC | {"risk_level": "紧急", "risk_score": 100}])
+    storage = FakeAlertStorage(items=[ALERT_DOC | {"risk_level": "critical", "risk_score": 100}])
 
     response = list_alerts(
-        risk_level="紧急",
-        username=None,
+        risk_level="critical",
+        user_id=None,
         rule=None,
         status=None,
         start_time=None,
@@ -180,15 +184,15 @@ def test_list_alerts_allows_emergency_risk_level() -> None:
         storage=storage,
     )
 
-    assert response.items[0].risk_level == "紧急"
-    assert storage.calls[0]["query"] == {"bool": {"filter": [{"term": {"risk_level": "紧急"}}]}}
+    assert response.items[0].risk_level == "critical"
+    assert storage.calls[0]["query"] == {"bool": {"filter": [{"term": {"risk_level": "critical"}}]}}
 
 
 def test_list_alerts_returns_standard_error_shape_when_query_fails() -> None:
     with pytest.raises(HTTPException) as exc_info:
         list_alerts(
             risk_level=None,
-            username=None,
+            user_id=None,
             rule=None,
             status=None,
             start_time=None,
@@ -210,7 +214,7 @@ def test_alerts_openapi_binds_contract_and_error_shape() -> None:
     operation = app.openapi()["paths"]["/api/v1/alerts"]["get"]
 
     assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
-        "$ref": "#/components/schemas/AlertEventListResponse"
+        "$ref": "#/components/schemas/AnomalyEventListResponse"
     }
     assert operation["responses"]["500"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ErrorResponse"
@@ -227,7 +231,7 @@ def test_elastic_search_page_supports_alert_sort_chain() -> None:
             return {
                 "hits": {
                     "total": {"value": 1, "relation": "eq"},
-                    "hits": [{"_id": "alert-doc-1", "_source": {"alert_id": "alert-1"}}],
+                    "hits": [{"_id": "alert-doc-1", "_source": {"event_id": "anom-1"}}],
                 }
             }
 
@@ -243,7 +247,7 @@ def test_elastic_search_page_supports_alert_sort_chain() -> None:
         sort=[{"detect_time": "desc"}],
     )
 
-    assert items == [{"alert_id": "alert-1", "_id": "alert-doc-1"}]
+    assert items == [{"event_id": "anom-1", "_id": "alert-doc-1"}]
     assert total == 1
     assert client.call == {
         "index": "security-alerts",

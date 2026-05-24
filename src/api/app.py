@@ -15,16 +15,16 @@ from src.config import settings
 from src.health import HealthResponse, get_health_status
 from src.report.daily_report import generate_daily_report
 from src.schemas import (
-    AIReport,
-    AIReportListResponse,
-    AlertDetailResponse,
+    AIJudgement,
+    AIJudgementListResponse,
+    AnomalyDetailResponse,
+    AnomalyEvent,
+    AnomalyEventListResponse,
     BaselineRebuildResponse,
     DailyReport,
     DailyReportListResponse,
     ErrorResponse,
     EvidenceChain,
-    AlertEvent,
-    AlertEventListResponse,
     NormalizedLog,
     NormalizedLogListResponse,
     RiskLevel,
@@ -102,9 +102,9 @@ def get_analyzer() -> AIAnalyzer:
 )
 def list_logs(
     source_type: SourceType | None = Query(default=None),
-    username: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
     src_ip: str | None = Query(default=None),
-    status: str | None = Query(default=None),
+    result: str | None = Query(default=None),
     start_time: datetime | None = Query(default=None),
     end_time: datetime | None = Query(default=None),
     limit: int = Query(default=50, ge=1),
@@ -114,9 +114,9 @@ def list_logs(
 # 构建 ES 查询
     query = _build_logs_query(
         source_type=source_type,
-        username=username,
+        user_id=user_id,
         src_ip=src_ip,
-        status=status,
+        result=result,
         start_time=start_time,
         end_time=end_time,
     )
@@ -190,7 +190,7 @@ def get_log_detail(
 
 @app.get(
     "/api/v1/alerts",
-    response_model=AlertEventListResponse,
+    response_model=AnomalyEventListResponse,
     responses=STANDARD_ERROR_RESPONSES,
     tags=["alerts"],
     summary="Query security alerts",
@@ -198,7 +198,7 @@ def get_log_detail(
 )
 def list_alerts(
     risk_level: RiskLevel | None = Query(default=None),
-    username: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
     rule: str | None = Query(default=None),
     status: str | None = Query(default=None),
     start_time: datetime | None = Query(default=None),
@@ -206,10 +206,10 @@ def list_alerts(
     limit: int = Query(default=50, ge=1),
     offset: int = Query(default=0, ge=0),
     storage: ElasticStorage = Depends(get_storage),
-) -> AlertEventListResponse:
+) -> AnomalyEventListResponse:
     query = _build_alerts_query(
         risk_level=risk_level,
-        username=username,
+        user_id=user_id,
         rule=rule,
         status=status,
         start_time=start_time,
@@ -233,7 +233,7 @@ def list_alerts(
             },
         ) from exc
 
-    return AlertEventListResponse(
+    return AnomalyEventListResponse(
         items=_strip_elasticsearch_metadata(items),
         total=total,
         limit=limit,
@@ -242,21 +242,21 @@ def list_alerts(
 
 
 @app.get(
-    "/api/v1/alerts/{alert_id}",
-    response_model=AlertDetailResponse,
+    "/api/v1/alerts/{event_id}",
+    response_model=AnomalyDetailResponse,
     responses=STANDARD_ERROR_RESPONSES,
     tags=["alerts"],
     summary="Get alert detail with evidence chain",
     description="REQ-004, REQ-006: fetch alert, user baseline, related logs, AI report, and evidence chain.",
 )
 def get_alert_detail(
-    alert_id: str,
+    event_id: str,
     storage: ElasticStorage = Depends(get_storage),
-) -> AlertDetailResponse:
+) -> AnomalyDetailResponse:
     try:
         alert_items, _total = storage.search_page(
             index=settings.elasticsearch_alert_index,
-            query={"term": {"alert_id": alert_id}},
+            query={"term": {"event_id": event_id}},
             limit=1,
             offset=0,
         )
@@ -266,7 +266,7 @@ def get_alert_detail(
             detail={
                 "code": "elasticsearch_query_failed",
                 "message": "Failed to query alert detail from Elasticsearch",
-                "details": {"index": settings.elasticsearch_alert_index, "alert_id": alert_id},
+                "details": {"index": settings.elasticsearch_alert_index, "event_id": event_id},
             },
         ) from exc
 
@@ -276,7 +276,7 @@ def get_alert_detail(
             detail={
                 "code": "alert_not_found",
                 "message": "Alert not found",
-                "details": {"index": settings.elasticsearch_alert_index, "alert_id": alert_id},
+                "details": {"index": settings.elasticsearch_alert_index, "event_id": event_id},
             },
         )
 
@@ -291,36 +291,36 @@ def get_alert_detail(
             detail={
                 "code": "elasticsearch_query_failed",
                 "message": "Failed to assemble alert evidence from Elasticsearch",
-                "details": {"alert_id": alert_id},
+                "details": {"event_id": event_id},
             },
         ) from exc
 
-    return AlertDetailResponse(
-        alert=alert,
+    return AnomalyDetailResponse(
+        anomaly=alert,
         baseline=baseline,
         related_logs=related_logs,
-        ai_report=ai_report,
+        ai_judgement=ai_report,
         evidence_chain=_build_evidence_chain(alert, baseline, related_logs),
     )
 
 
 @app.post(
-    "/api/v1/alerts/{alert_id}/analyze",
-    response_model=AIReport,
+    "/api/v1/alerts/{event_id}/analyze",
+    response_model=AIJudgement,
     responses=STANDARD_ERROR_RESPONSES,
     tags=["alerts"],
     summary="Analyze an alert with AI",
     description="REQ-004: analyze an existing alert with alert, baseline, related_logs, and window_stats context, then store the AI report.",
 )
 def analyze_alert(
-    alert_id: str,
+    event_id: str,
     storage: ElasticStorage = Depends(get_storage),
     analyzer: AIAnalyzer = Depends(get_analyzer),
-) -> AIReport:
+) -> AIJudgement:
     try:
         alert_items, _total = storage.search_page(
             index=settings.elasticsearch_alert_index,
-            query={"term": {"alert_id": alert_id}},
+            query={"term": {"event_id": event_id}},
             limit=1,
             offset=0,
         )
@@ -330,7 +330,7 @@ def analyze_alert(
             detail={
                 "code": "elasticsearch_query_failed",
                 "message": "Failed to query alert for AI analysis",
-                "details": {"index": settings.elasticsearch_alert_index, "alert_id": alert_id},
+                "details": {"index": settings.elasticsearch_alert_index, "event_id": event_id},
             },
         ) from exc
 
@@ -340,7 +340,7 @@ def analyze_alert(
             detail={
                 "code": "alert_not_found",
                 "message": "Alert not found",
-                "details": {"index": settings.elasticsearch_alert_index, "alert_id": alert_id},
+                "details": {"index": settings.elasticsearch_alert_index, "event_id": event_id},
             },
         )
 
@@ -349,17 +349,17 @@ def analyze_alert(
         baseline = _fetch_alert_baseline(storage, alert)
         related_logs = _fetch_related_logs(storage, alert)
         report = analyzer.analyze(
-            alert=AlertEvent.model_validate(alert),
+            event=AnomalyEvent.model_validate(alert),
             baseline=baseline,
             related_logs=related_logs,
             window_stats={},
         )
         report_doc = report.model_dump(mode="json")
-        storage.index_document(settings.elasticsearch_ai_index, report_doc, doc_id=report.ai_report_id)
+        storage.index_document(settings.elasticsearch_ai_index, report_doc, doc_id=report.judgement_id)
         storage.update_document(
             settings.elasticsearch_alert_index,
-            alert_id,
-            {"llm_analysis_id": report.ai_report_id, "status": "analyzed"},
+            event_id,
+            {"ai_status": "analyzed"},
         )
     except Exception as exc:
         raise HTTPException(
@@ -368,7 +368,7 @@ def analyze_alert(
                 "code": "alert_analysis_failed",
                 "message": "Failed to analyze alert and store AI report",
                 "details": {
-                    "alert_id": alert_id,
+                    "event_id": event_id,
                     "ai_index": settings.elasticsearch_ai_index,
                     "alert_index": settings.elasticsearch_alert_index,
                 },
@@ -397,7 +397,7 @@ def list_baselines(
             query={"match_all": {}},
             limit=limit,
             offset=offset,
-            sort=[{"updated_at": "desc"}],
+            sort=[{"created_at": "desc"}],
         )
     except Exception as exc:
         raise HTTPException(
@@ -448,7 +448,7 @@ def rebuild_baselines(
 
 
 @app.get(
-    "/api/v1/baselines/{username}",
+    "/api/v1/baselines/{user_id}",
     response_model=UserBaseline,
     responses=STANDARD_ERROR_RESPONSES,
     tags=["baselines"],
@@ -456,13 +456,13 @@ def rebuild_baselines(
     description="REQ-003, REQ-006: fetch one user behavior baseline.",
 )
 def get_baseline_detail(
-    username: str,
+    user_id: str,
     storage: ElasticStorage = Depends(get_storage),
 ) -> UserBaseline:
     try:
         items, _total = storage.search_page(
             index=settings.elasticsearch_baseline_index,
-            query={"term": {"username": username}},
+            query={"term": {"user_id": user_id}},
             limit=1,
             offset=0,
         )
@@ -472,7 +472,7 @@ def get_baseline_detail(
             detail={
                 "code": "elasticsearch_query_failed",
                 "message": "Failed to query user baseline from Elasticsearch",
-                "details": {"index": settings.elasticsearch_baseline_index, "username": username},
+                "details": {"index": settings.elasticsearch_baseline_index, "user_id": user_id},
             },
         ) from exc
 
@@ -482,7 +482,7 @@ def get_baseline_detail(
             detail={
                 "code": "baseline_not_found",
                 "message": "User baseline not found",
-                "details": {"index": settings.elasticsearch_baseline_index, "username": username},
+                "details": {"index": settings.elasticsearch_baseline_index, "user_id": user_id},
             },
         )
 
@@ -491,7 +491,7 @@ def get_baseline_detail(
 
 @app.get(
     "/api/v1/ai-reports",
-    response_model=AIReportListResponse,
+    response_model=AIJudgementListResponse,
     responses=STANDARD_ERROR_RESPONSES,
     tags=["ai-reports"],
     summary="Query AI analysis reports",
@@ -501,7 +501,7 @@ def list_ai_reports(
     limit: int = Query(default=50, ge=1),
     offset: int = Query(default=0, ge=0),
     storage: ElasticStorage = Depends(get_storage),
-) -> AIReportListResponse:
+) -> AIJudgementListResponse:
     try:
         items, total = storage.search_page(
             index=settings.elasticsearch_ai_index,
@@ -520,7 +520,7 @@ def list_ai_reports(
             },
         ) from exc
 
-    return AIReportListResponse(
+    return AIJudgementListResponse(
         items=_strip_elasticsearch_metadata(items),
         total=total,
         limit=limit,
@@ -667,9 +667,9 @@ def _build_error_response(
 def _build_logs_query(
     *,
     source_type: SourceType | None = None,
-    username: str | None = None,
+    user_id: str | None = None,
     src_ip: str | None = None,
-    status: str | None = None,
+    result: str | None = None,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
 ) -> dict[str, Any]:
@@ -687,12 +687,12 @@ def _build_logs_query(
             }
         }
     ]
-    # 添加可选筛选条件，比如输入：username:"Alice"，会以es的json格式追加一个term条件：用户名为Alice（精确匹配的筛选条件）
+    # 添加可选筛选条件，比如输入 user_id="Alice"，会追加一个精确匹配过滤条件。
     for field, value in (
         ("source_type", source_type),
-        ("username", username),
+        ("user_id", user_id),
         ("src_ip", src_ip),
-        ("status", status),
+        ("result", result),
     ):
         if value is not None:
             filters.append({"term": {field: value}})
@@ -703,7 +703,7 @@ def _build_logs_query(
 def _build_alerts_query(
     *,
     risk_level: RiskLevel | None = None,
-    username: str | None = None,
+    user_id: str | None = None,
     rule: str | None = None,
     status: str | None = None,
     start_time: datetime | None = None,
@@ -720,7 +720,7 @@ def _build_alerts_query(
 
     for field, value in (
         ("risk_level", risk_level),
-        ("username", username),
+        ("user_id", user_id),
         ("status", status),
     ):
         if value is not None:
@@ -750,13 +750,13 @@ def _strip_elasticsearch_metadata(items: list[dict[str, Any]]) -> list[dict[str,
 
 
 def _fetch_alert_baseline(storage: ElasticStorage, alert: dict[str, Any]) -> dict[str, Any]:
-    username = alert.get("username")
-    if not username:
+    user_id = alert.get("user_id")
+    if not user_id:
         return {}
 
     items, _total = storage.search_page(
         index=settings.elasticsearch_baseline_index,
-        query={"term": {"username": username}},
+        query={"term": {"user_id": user_id}},
         limit=1,
         offset=0,
     )
@@ -781,25 +781,13 @@ def _fetch_related_logs(storage: ElasticStorage, alert: dict[str, Any]) -> list[
 
 
 def _fetch_ai_report(storage: ElasticStorage, alert: dict[str, Any]) -> dict[str, Any]:
-    llm_analysis_id = alert.get("llm_analysis_id")
-    if llm_analysis_id:
-        items, _total = storage.search_page(
-            index=settings.elasticsearch_ai_index,
-            query={"term": {"ai_report_id": llm_analysis_id}},
-            limit=1,
-            offset=0,
-            sort=[{"created_at": "desc"}],
-        )
-        if items:
-            return _strip_elasticsearch_metadata(items)[0]
-
-    alert_id = alert.get("alert_id")
-    if not alert_id:
+    event_id = alert.get("event_id")
+    if not event_id:
         return {}
 
     items, _total = storage.search_page(
         index=settings.elasticsearch_ai_index,
-        query={"term": {"alert_id": alert_id}},
+        query={"term": {"event_id": event_id}},
         limit=1,
         offset=0,
         sort=[{"created_at": "desc"}],
@@ -814,6 +802,9 @@ def _build_evidence_chain(alert: dict[str, Any], baseline: dict[str, Any], relat
     return EvidenceChain(
         rule_hits=rule_hits,
         baseline_deviations=baseline_deviations,
+        reason_codes=_string_list(alert.get("reason_codes")),
+        risk_components=alert.get("risk_components") if isinstance(alert.get("risk_components"), dict) else {},
+        ai_status=str(alert.get("ai_status") or "not_required"),
         risk_reason=risk_reason,
     )
 
@@ -833,39 +824,44 @@ def _extract_baseline_deviations(
 
     deviations: list[str] = []
     src_ip = _first_string(evidence.get("src_ip"), evidence.get("new_ip"), alert.get("src_ip"))
-    common_ips = _string_list(baseline.get("common_ips"))
+    location_profile = baseline.get("location_profile") if isinstance(baseline.get("location_profile"), dict) else {}
+    access_profile = baseline.get("access_profile") if isinstance(baseline.get("access_profile"), dict) else {}
+    time_profile = baseline.get("time_profile") if isinstance(baseline.get("time_profile"), dict) else {}
+    result_profile = baseline.get("result_profile") if isinstance(baseline.get("result_profile"), dict) else {}
+
+    common_ips = _string_list(location_profile.get("common_ips"))
     if src_ip and common_ips and src_ip not in common_ips:
-        deviations.append(f"src_ip {src_ip} is outside baseline common_ips")
+        deviations.append(f"src_ip {src_ip} is outside baseline location_profile.common_ips")
 
     event_hour = _event_hour(alert.get("event_time"))
-    active_hours = _string_list(baseline.get("active_hours"))
+    active_hours = _string_list(time_profile.get("active_hours"))
     if event_hour is not None and active_hours and not _hour_in_ranges(event_hour, active_hours):
-        deviations.append(f"event hour {event_hour:02d}:00 is outside baseline active_hours")
+        deviations.append(f"event hour {event_hour:02d}:00 is outside baseline time_profile.active_hours")
 
     resource = _first_string(evidence.get("resource"), _first_related_value(related_logs, "resource"))
-    common_resources = _string_list(baseline.get("common_resources"))
+    common_resources = _string_list(access_profile.get("common_resources"))
     if resource and common_resources and resource not in common_resources:
-        deviations.append(f"resource {resource} is outside baseline common_resources")
+        deviations.append(f"resource {resource} is outside baseline access_profile.common_resources")
 
     user_agent = _first_related_value(related_logs, "user_agent")
-    common_user_agents = _string_list(baseline.get("common_user_agents"))
+    common_user_agents = _string_list(access_profile.get("common_user_agents"))
     if user_agent and common_user_agents and user_agent not in common_user_agents:
-        deviations.append("user_agent is outside baseline common_user_agents")
+        deviations.append("user_agent is outside baseline access_profile.common_user_agents")
 
     api_calls = _numeric(evidence.get("api_calls_1m"))
-    avg_api = _numeric(baseline.get("avg_api_calls_per_minute"))
+    avg_api = _numeric(access_profile.get("avg_api_calls_per_minute"))
     if api_calls is not None and avg_api is not None and api_calls > max(avg_api * 2, avg_api + 5):
-        deviations.append(f"api_calls_1m {api_calls:g} exceeds baseline avg_api_calls_per_minute {avg_api:g}")
+        deviations.append(f"api_calls_1m {api_calls:g} exceeds baseline access_profile.avg_api_calls_per_minute {avg_api:g}")
 
     failed_count = _numeric(evidence.get("failed_count_5m"))
-    failed_baseline = _numeric(baseline.get("failed_login_count_7d"))
+    failed_baseline = _numeric(result_profile.get("failed_login_count_7d"))
     if failed_count is not None and failed_baseline is not None and failed_count > max(3, failed_baseline):
-        deviations.append(f"failed_count_5m {failed_count:g} exceeds baseline failed_login_count_7d {failed_baseline:g}")
+        deviations.append(f"failed_count_5m {failed_count:g} exceeds baseline result_profile.failed_login_count_7d {failed_baseline:g}")
 
     sensitive_count = _numeric(evidence.get("sensitive_count_5m"))
-    sensitive_rate = _numeric(baseline.get("sensitive_access_rate"))
+    sensitive_rate = _numeric(access_profile.get("sensitive_access_rate"))
     if sensitive_count is not None and sensitive_count > 0 and sensitive_rate is not None and sensitive_rate < 0.1:
-        deviations.append(f"sensitive access count {sensitive_count:g} is unusual for baseline sensitive_access_rate {sensitive_rate:g}")
+        deviations.append(f"sensitive access count {sensitive_count:g} is unusual for baseline access_profile.sensitive_access_rate {sensitive_rate:g}")
 
     return deviations
 
