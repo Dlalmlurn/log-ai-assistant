@@ -1,10 +1,18 @@
 # VPN 登录日志生成器
 
-模拟真实企业环境的 VPN 登录日志，包含 5W1H 要素和用户行为基线，可用于安全分析、SIEM 规则测试、异常检测模型训练等场景。
+模拟真实企业环境的 VPN 登录日志，包含 5W1H 要素和生成器用户先验，可用于安全分析、SIEM 规则测试、异常检测模型训练等场景。
 
 ---
 
 ## 快速开始
+
+项目正式运行环境使用 Docker Compose。日常开发默认由 `log-generator` service 持续追加小规模日志到 `logs/vpn_logs.log`，再由 Filebeat 采集。
+
+```bash
+docker compose up --build
+```
+
+以下命令仅作为生成器脚本的本地调试方式，不是项目正式运行要求：
 
 ```bash
 # 默认：生成 7 天，每天 50 条正常登录
@@ -50,11 +58,13 @@ python gen_vpn_logs.py --seed 123
 
 ---
 
-## 行为基线
+## 生成器用户先验
 
-每个模拟用户都有预设的行为基线，偏离基线的行为会被标记并计入风险评分。
+每个模拟用户都有预设的行为习惯，偏离这些先验的行为会被标记并计入风险评分。
 
-### 用户基线配置
+这些配置只用于生成有规律的模拟日志，不等于系统学习出来的 UserBaseline。系统 baseline 必须从入库后的历史日志中统计生成。
+
+### 用户先验配置
 
 | 用户 | 部门 | 常用工作时间 | 工作日 | 常用 IP 段 |
 |------|------|-------------|--------|-----------|
@@ -87,7 +97,7 @@ python gen_vpn_logs.py --seed 123
 
 ### JSONL（`vpn_logs.jsonl`）
 
-每行一个 JSON 对象，适合流式处理、Elasticsearch 批量导入。
+每行一个 JSON 对象，适合流式处理和后续写入 Kafka / ClickHouse 链路。
 
 ```json
 {"timestamp": "2026-04-01 09:40:16", "username": "wang.jian", "dept": "运维部", "role": "ops", "src_ip": "101.89.15.190", "src_country": "中国", "src_city": "上海", "vpn_gateway": "vpn-gw-bj01", "dst_internal_ip": "10.2.140.10", "event_type": "LOGIN_SUCCESS", "protocol": "IPSec", "auth_method": "password+OTP", "client_software": "GlobalProtect 6.1", "session_id": "639174A3-EB41-4B", "result": "SUCCESS", "fail_reason": null, "session_duration_sec": 4265, "bytes_sent": 6098105, "bytes_recv": 190737046, "is_off_hours": false, "is_unusual_ip": false, "risk_score": 0, "risk_tags": "正常"}

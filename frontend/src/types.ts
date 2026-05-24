@@ -5,7 +5,7 @@ export type LogResult = "success" | "fail" | "denied" | "error";
 export type HealthResponse = {
   kafka: boolean;
   flink: boolean;
-  elasticsearch: boolean;
+  clickhouse: boolean;
   dashscope_configured: boolean;
   latest_log_ingest_time: string | null;
   consumer_lag: Record<string, number>;

@@ -1,14 +1,4 @@
-kafka-python==2.0.2
-elasticsearch==8.13.0
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
-apache-flink==1.18.1; python_version < "3.11"
-streamlit==1.35.0
-dashscope>=1.20.0
-langchain==0.2.16
-langchain-community==0.2.16
-python-dotenv==1.0.1
-pydantic==2.8.2
-pandas==2.2.2
-requests==2.32.3
-pytest==8.2.2
+# Compatibility wrapper for local tools.
+# Dockerfiles use the split files under requirements/ directly.
+-r requirements/backend.txt
+-r requirements/test.txt

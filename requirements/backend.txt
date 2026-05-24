@@ -1,0 +1,10 @@
+clickhouse-connect==0.8.9
+# Legacy adapter compatibility while API storage paths are migrated to ClickHouse.
+elasticsearch==8.13.0
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+pydantic==2.8.2
+python-dotenv==1.0.1
+kafka-python==2.0.2
+requests==2.32.3
+dashscope>=1.20.0
