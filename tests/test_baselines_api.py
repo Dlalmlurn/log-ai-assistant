@@ -12,15 +12,29 @@ api_app_module = importlib.import_module("src.api.app")
 
 BASELINE_DOC = {
     "_id": "baseline-doc-1",
-    "username": "alice",
-    "active_hours": ["09:00-18:00"],
-    "common_ips": ["10.0.0.7"],
-    "common_user_agents": ["Chrome"],
-    "avg_api_calls_per_minute": 2.4,
-    "common_resources": ["/home", "/api/profile"],
-    "failed_login_count_7d": 1,
-    "sensitive_access_rate": 0.02,
-    "updated_at": "2026-05-13T10:00:00Z",
+    "baseline_date": "2026-05-13",
+    "tenant_id": "default",
+    "user_id": "alice",
+    "model_version": "baseline-v1",
+    "trained_from": "2026-05-06",
+    "trained_to": "2026-05-12",
+    "sample_days": 7,
+    "sample_count": 100,
+    "baseline_confidence": 1.0,
+    "who_profile": {"user_id": "alice"},
+    "time_profile": {"active_hours": ["09:00-18:00"]},
+    "location_profile": {"common_ips": ["10.0.0.7"]},
+    "access_profile": {
+        "common_user_agents": ["Chrome"],
+        "common_resources": ["/home", "/api/profile"],
+        "avg_api_calls_per_minute": 2.4,
+        "sensitive_access_rate": 0.02,
+    },
+    "volume_profile": {},
+    "result_profile": {"failed_login_count_7d": 1},
+    "why_profile": {},
+    "fallback_level": "none",
+    "created_at": "2026-05-13T10:00:00Z",
 }
 
 
@@ -59,7 +73,7 @@ def test_list_baselines_queries_user_baselines_with_pagination() -> None:
     response = list_baselines(limit=25, offset=50, storage=storage)
     payload = response.model_dump(mode="json")
 
-    assert payload["items"][0]["username"] == "alice"
+    assert payload["items"][0]["user_id"] == "alice"
     assert "_id" not in payload["items"][0]
     assert response.total == 7
     assert response.limit == 25
@@ -70,24 +84,24 @@ def test_list_baselines_queries_user_baselines_with_pagination() -> None:
             "query": {"match_all": {}},
             "limit": 25,
             "offset": 50,
-            "sort": [{"updated_at": "desc"}],
+            "sort": [{"created_at": "desc"}],
         }
     ]
 
 
-def test_get_baseline_detail_queries_user_baselines_by_username() -> None:
+def test_get_baseline_detail_queries_user_baselines_by_user_id() -> None:
     storage = FakeBaselineStorage()
 
-    response = get_baseline_detail(username="alice", storage=storage)
+    response = get_baseline_detail(user_id="alice", storage=storage)
     payload = response.model_dump(mode="json")
 
-    assert payload["username"] == "alice"
-    assert payload["common_ips"] == ["10.0.0.7"]
+    assert payload["user_id"] == "alice"
+    assert payload["location_profile"]["common_ips"] == ["10.0.0.7"]
     assert "_id" not in payload
     assert storage.calls == [
         {
             "index": settings.elasticsearch_baseline_index,
-            "query": {"term": {"username": "alice"}},
+            "query": {"term": {"user_id": "alice"}},
             "limit": 1,
             "offset": 0,
         }
@@ -96,7 +110,7 @@ def test_get_baseline_detail_queries_user_baselines_by_username() -> None:
 
 def test_get_baseline_detail_returns_clear_404_error_when_missing() -> None:
     with pytest.raises(HTTPException) as exc_info:
-        get_baseline_detail(username="missing-user", storage=FakeBaselineStorage(items=[]))
+        get_baseline_detail(user_id="missing-user", storage=FakeBaselineStorage(items=[]))
 
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail == {
@@ -104,7 +118,7 @@ def test_get_baseline_detail_returns_clear_404_error_when_missing() -> None:
         "message": "User baseline not found",
         "details": {
             "index": settings.elasticsearch_baseline_index,
-            "username": "missing-user",
+            "user_id": "missing-user",
         },
     }
 
@@ -196,7 +210,7 @@ def test_baseline_rebuild_openapi_binds_contract_and_error_shape() -> None:
 
 
 def test_baseline_detail_openapi_binds_contract_and_error_shape() -> None:
-    operation = app.openapi()["paths"]["/api/v1/baselines/{username}"]["get"]
+    operation = app.openapi()["paths"]["/api/v1/baselines/{user_id}"]["get"]
 
     assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/UserBaseline"

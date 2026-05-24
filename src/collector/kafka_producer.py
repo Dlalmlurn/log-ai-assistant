@@ -29,7 +29,7 @@ class RawKafkaProducer:
         extra: dict[str, Any] | None = None,
     ) -> None:
         envelope = {
-            "raw_message": raw_line,
+            "raw_log": raw_line,
             "source_type": source_type,
             "ingest_time": datetime.now(timezone.utc).isoformat(),
         }

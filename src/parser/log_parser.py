@@ -28,17 +28,20 @@ def _parse_time(raw: str | None) -> datetime:
         return datetime.now(timezone.utc)
 
 
-def _to_status(result: str | None, event_type: str | None) -> str:
+VALID_SOURCE_TYPES = {"vpn", "oa", "api", "system", "file", "database", "security_device"}
+
+
+def _to_result(result: str | None, event_type: str | None) -> str:
     normalized = (result or "").upper()
     if normalized in {"SUCCESS", "OK", "ALLOW"}:
         return "success"
     if normalized in {"FAIL", "FAILED"}:
-        return "failed"
+        return "fail"
     if normalized in {"DENIED", "BLOCKED"}:
         return "denied"
     ev = (event_type or "").upper()
     if "FAIL" in ev:
-        return "failed"
+        return "fail"
     if "DENY" in ev or "BLOCK" in ev:
         return "denied"
     if "ERROR" in ev or "CRITICAL" in ev:
@@ -115,57 +118,57 @@ def _parse_syslog(raw: str) -> dict[str, Any] | None:
     return result
 
 
-def parse_log_line(raw_message: str) -> dict[str, Any]:
-    parsed = _parse_json(raw_message)
+def parse_log_line(raw_log: str) -> dict[str, Any]:
+    parsed = _parse_json(raw_log)
     if parsed is not None:
         return parsed
-    parsed = _parse_syslog(raw_message)
+    parsed = _parse_syslog(raw_log)
     if parsed is not None:
         return parsed
-    return {"message": raw_message}
+    return {"message": raw_log}
 
 
 def normalize_raw_record(payload: str | dict[str, Any], source_type_hint: str = "vpn") -> NormalizedLog:
-    raw_message = ""
+    raw_log = ""
     source_type = source_type_hint
 
     if isinstance(payload, str):
         maybe_envelope = _parse_json(payload)
-        if maybe_envelope and "raw_message" in maybe_envelope:
+        if maybe_envelope and "raw_log" in maybe_envelope:
             source_type = maybe_envelope.get("source_type", source_type_hint)
-            raw_message = str(maybe_envelope["raw_message"])
+            raw_log = str(maybe_envelope["raw_log"])
         elif maybe_envelope and "message" in maybe_envelope and "timestamp" not in maybe_envelope:
             source_type = str(maybe_envelope.get("source_type", source_type_hint))
-            raw_message = str(maybe_envelope["message"])
+            raw_log = str(maybe_envelope["message"])
         elif maybe_envelope:
             parsed = maybe_envelope
-            raw_message = json.dumps(parsed, ensure_ascii=False)
-            return _build_normalized(parsed, raw_message=raw_message, source_type=source_type)
+            raw_log = json.dumps(parsed, ensure_ascii=False)
+            return _build_normalized(parsed, raw_log=raw_log, source_type=source_type)
         else:
-            raw_message = payload
+            raw_log = payload
     elif isinstance(payload, dict):
-        if "raw_message" in payload:
+        if "raw_log" in payload:
             source_type = str(payload.get("source_type", source_type_hint))
-            raw_message = str(payload["raw_message"])
+            raw_log = str(payload["raw_log"])
         elif "message" in payload and "timestamp" not in payload and "event_time" not in payload:
             source_type = str(payload.get("source_type", source_type_hint))
-            raw_message = str(payload["message"])
+            raw_log = str(payload["message"])
         else:
-            raw_message = json.dumps(payload, ensure_ascii=False)
-            return _build_normalized(payload, raw_message=raw_message, source_type=source_type)
+            raw_log = json.dumps(payload, ensure_ascii=False)
+            return _build_normalized(payload, raw_log=raw_log, source_type=source_type)
 
-    parsed = parse_log_line(raw_message)
-    return _build_normalized(parsed, raw_message=raw_message, source_type=source_type)
+    parsed = parse_log_line(raw_log)
+    return _build_normalized(parsed, raw_log=raw_log, source_type=source_type)
 
 
-def _build_normalized(parsed: dict[str, Any], raw_message: str, source_type: str) -> NormalizedLog:
+def _build_normalized(parsed: dict[str, Any], raw_log: str, source_type: str) -> NormalizedLog:
     event_time = _parse_time(parsed.get("timestamp") or parsed.get("event_time"))
     ingest_time = datetime.now(timezone.utc)
 
-    username = parsed.get("username") or parsed.get("user")
+    user_id = parsed.get("user_id") or parsed.get("username") or parsed.get("user")
     src_ip = parsed.get("src_ip")
     event_type = parsed.get("event_type")
-    result = parsed.get("result")
+    raw_result = parsed.get("result")
 
     dst_ip = parsed.get("dst_internal_ip")
     if isinstance(dst_ip, str) and dst_ip.upper() == "N/A":
@@ -173,7 +176,7 @@ def _build_normalized(parsed: dict[str, Any], raw_message: str, source_type: str
 
     resource = parsed.get("resource") or dst_ip or parsed.get("vpn_gateway")
     action = _to_action(source_type, event_type, resource)
-    status = _to_status(result, event_type)
+    result = _to_result(raw_result, event_type)
 
     risk_tags_raw = parsed.get("risk_tags")
     risk_tags: list[str] = []
@@ -185,30 +188,58 @@ def _build_normalized(parsed: dict[str, Any], raw_message: str, source_type: str
     message = parsed.get("message")
     if not message:
         message = (
-            f"event_type={event_type or 'UNKNOWN'} user={username or 'unknown'} "
-            f"src_ip={src_ip or 'unknown'} status={status}"
+            f"event_type={event_type or 'UNKNOWN'} user={user_id or 'unknown'} "
+            f"src_ip={src_ip or 'unknown'} result={result}"
         )
+
+    session_id = parsed.get("session_id") or parsed.get("session")
+    geo = {
+        key: value
+        for key, value in {
+            "country": parsed.get("src_country"),
+            "city": parsed.get("src_city"),
+            "raw": parsed.get("src_geo"),
+        }.items()
+        if value
+    }
 
     normalized = {
         "event_id": str(uuid.uuid4()),
         "event_time": event_time,
         "ingest_time": ingest_time,
-        "source_type": source_type if source_type in {"vpn", "oa", "api", "system", "security_device"} else "vpn",
-        "username": username,
+        "tenant_id": str(parsed.get("tenant_id") or "default"),
+        "source_type": source_type if source_type in VALID_SOURCE_TYPES else "vpn",
+        "log_type": str(parsed.get("log_type") or event_type or source_type).lower(),
+        "user_id": user_id,
+        "account_type": parsed.get("account_type") or "unknown",
+        "user_role": parsed.get("user_role") or parsed.get("role"),
+        "department": parsed.get("department") or parsed.get("dept"),
+        "host": parsed.get("host") or parsed.get("vpn_gateway"),
         "src_ip": src_ip,
         "src_port": _safe_int(parsed.get("src_port")),
         "dst_ip": dst_ip,
         "dst_port": _safe_int(parsed.get("dst_port")),
+        "geo": geo,
         "action": action,
+        "object_type": parsed.get("object_type"),
+        "object_id": parsed.get("object_id"),
         "resource": resource,
-        "status": status,
-        "http_method": parsed.get("http_method"),
-        "user_agent": parsed.get("user_agent") or parsed.get("client_software"),
+        "result": result,
+        "severity": _to_severity(parsed),
+        "user_agent": parsed.get("user_agent") or parsed.get("client_software") or parsed.get("client"),
+        "protocol": parsed.get("protocol") or parsed.get("proto"),
+        "auth_method": parsed.get("auth_method") or parsed.get("auth"),
+        "session_id": session_id,
         "message": str(message),
-        "raw_message": raw_message,
+        "raw_log": raw_log,
         "risk_tags": risk_tags,
-        "trace_id": parsed.get("trace_id") or parsed.get("session_id"),
-        "original_fields": parsed,
+        "trace_id": parsed.get("trace_id") or session_id,
+        "scenario_id": parsed.get("scenario_id"),
+        "scenario_type": parsed.get("scenario_type"),
+        "attack_chain_id": parsed.get("attack_chain_id"),
+        "step_index": _safe_int(parsed.get("step_index")),
+        "injected_label": parsed.get("injected_label"),
+        "attrs": parsed,
     }
     return NormalizedLog.model_validate(normalized)
 
@@ -220,3 +251,14 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _to_severity(parsed: dict[str, Any]) -> int:
+    severity = _safe_int(parsed.get("severity"))
+    if severity is not None:
+        return max(0, min(10, severity))
+
+    risk_score = _safe_int(parsed.get("risk_score"))
+    if risk_score is None:
+        return 0
+    return max(0, min(10, round(risk_score / 10)))

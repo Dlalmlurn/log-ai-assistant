@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.ai_engine import AIAnalyzer
 from src.config import settings
 from src.report.daily_report import generate_daily_report
-from src.schemas import AlertEvent
+from src.schemas import AnomalyEvent
 from src.storage import ElasticStorage
 
 st.set_page_config(page_title="日志分析 AI 助手", layout="wide")
@@ -43,7 +43,7 @@ def page_overview(storage: ElasticStorage) -> None:
     alert_count = storage.count(settings.elasticsearch_alert_index, alert_query)
     high_alert_count = storage.count(
         settings.elasticsearch_alert_index,
-        {"bool": {"must": [alert_query, {"term": {"risk_level": "高"}}]}},
+        {"bool": {"must": [alert_query, {"term": {"risk_level": "high"}}]}},
     )
     user_agg = storage.aggregate(
         settings.elasticsearch_log_index,
@@ -51,7 +51,7 @@ def page_overview(storage: ElasticStorage) -> None:
             "size": 0,
             "query": today_query,
             "aggs": {
-                "users": {"cardinality": {"field": "username"}},
+                "users": {"cardinality": {"field": "user_id"}},
                 "ips": {"cardinality": {"field": "src_ip"}},
             },
         },
@@ -75,9 +75,9 @@ def page_recent_logs(storage: ElasticStorage) -> None:
     st.title("最近日志")
     col1, col2, col3, col4 = st.columns(4)
     source_type = col1.selectbox("source_type", ["全部", "vpn", "oa", "api", "system", "security_device"])
-    username = col2.text_input("username")
+    user_id = col2.text_input("user_id")
     src_ip = col3.text_input("src_ip")
-    status = col4.selectbox("status", ["全部", "success", "failed", "denied", "error"])
+    result = col4.selectbox("result", ["全部", "success", "fail", "denied", "error"])
     now_utc = datetime.now(timezone.utc)
     t1, t2, t3, t4 = st.columns(4)
     start_date = t1.date_input("开始日期", value=(now_utc - timedelta(days=1)).date())
@@ -94,12 +94,12 @@ def page_recent_logs(storage: ElasticStorage) -> None:
     must.append({"range": {"ingest_time": {"gte": start_time.isoformat(), "lte": end_time.isoformat()}}})
     if source_type != "全部":
         must.append({"term": {"source_type": source_type}})
-    if username:
-        must.append({"term": {"username": username}})
+    if user_id:
+        must.append({"term": {"user_id": user_id}})
     if src_ip:
         must.append({"term": {"src_ip": src_ip}})
-    if status != "全部":
-        must.append({"term": {"status": status}})
+    if result != "全部":
+        must.append({"term": {"result": result}})
 
     logs = storage.search(
         settings.elasticsearch_log_index,
@@ -111,13 +111,13 @@ def page_recent_logs(storage: ElasticStorage) -> None:
     st.dataframe(df, use_container_width=True)
 
 
-def _load_alerts(storage: ElasticStorage, risk: str, username: str, rule: str) -> list[dict]:
+def _load_alerts(storage: ElasticStorage, risk: str, user_id: str, rule: str) -> list[dict]:
     must = []
     must.append({"range": {"detect_time": {"gte": (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()}}})
     if risk != "全部":
         must.append({"term": {"risk_level": risk}})
-    if username:
-        must.append({"term": {"username": username}})
+    if user_id:
+        must.append({"term": {"user_id": user_id}})
     if rule:
         must.append({"match_phrase": {"rule_hits": rule}})
 
@@ -132,20 +132,20 @@ def _load_alerts(storage: ElasticStorage, risk: str, username: str, rule: str) -
 def page_alerts(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
     st.title("异常事件")
     c1, c2, c3 = st.columns(3)
-    risk = c1.selectbox("风险等级", ["全部", "低", "中", "高"])
-    username = c2.text_input("用户")
+    risk = c1.selectbox("风险等级", ["全部", "low", "medium", "high", "critical"])
+    user_id = c2.text_input("用户")
     rule = c3.text_input("规则关键词")
 
-    alerts = _load_alerts(storage, risk, username, rule)
+    alerts = _load_alerts(storage, risk, user_id, rule)
     if not alerts:
         st.info("暂无异常事件")
         return
 
     df = pd.DataFrame(alerts)
-    st.dataframe(df[["alert_id", "detect_time", "username", "src_ip", "risk_level", "rule_hits", "status"]], use_container_width=True)
+    st.dataframe(df[["event_id", "detect_time", "user_id", "src_ip", "risk_level", "rule_hits", "status"]], use_container_width=True)
 
-    selected_id = st.selectbox("选择异常事件", options=df["alert_id"].tolist())
-    selected = next(item for item in alerts if item.get("alert_id") == selected_id)
+    selected_id = st.selectbox("选择异常事件", options=df["event_id"].tolist())
+    selected = next(item for item in alerts if item.get("event_id") == selected_id)
 
     st.subheader("异常详情")
     st.json(selected)
@@ -160,7 +160,7 @@ def page_alerts(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
 
     baseline = storage.search(
         settings.elasticsearch_baseline_index,
-        query={"term": {"username": selected.get("username")}},
+        query={"term": {"user_id": selected.get("user_id")}},
         size=1,
     )
     st.subheader("用户行为基线")
@@ -168,7 +168,7 @@ def page_alerts(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
 
     ai_report = storage.search(
         settings.elasticsearch_ai_index,
-        query={"term": {"alert_id": selected_id}},
+        query={"term": {"event_id": selected_id}},
         size=1,
         sort=[{"created_at": "desc"}],
     )
@@ -176,15 +176,15 @@ def page_alerts(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
     st.json(ai_report[0] if ai_report else {})
 
     if st.button("重新 AI 研判", key=f"reanalyze-{selected_id}"):
-        alert = AlertEvent.model_validate(selected)
+        alert = AnomalyEvent.model_validate(selected)
         baseline_doc = baseline[0] if baseline else {}
-        report = analyzer.analyze(alert, baseline=baseline_doc, related_logs=related_logs)
+        report = analyzer.analyze(event=alert, baseline=baseline_doc, related_logs=related_logs)
         report_doc = report.model_dump(mode="json")
-        storage.index_document(settings.elasticsearch_ai_index, report_doc, doc_id=report.ai_report_id)
+        storage.index_document(settings.elasticsearch_ai_index, report_doc, doc_id=report.judgement_id)
         storage.update_document(
             settings.elasticsearch_alert_index,
             selected_id,
-            {"llm_analysis_id": report.ai_report_id, "status": "analyzed"},
+            {"ai_status": "analyzed"},
         )
         st.success("已重新生成 AI 研判")
 
@@ -206,10 +206,10 @@ def page_user_risk(storage: ElasticStorage) -> None:
         "size": 0,
         "aggs": {
             "users": {
-                "terms": {"field": "username", "size": 20},
+                "terms": {"field": "user_id", "size": 20},
                 "aggs": {
-                    "alert_count": {"value_count": {"field": "alert_id"}},
-                    "high_count": {"filter": {"term": {"risk_level": "高"}}},
+                    "alert_count": {"value_count": {"field": "event_id"}},
+                    "high_count": {"filter": {"term": {"risk_level": "high"}}},
                     "risk_score": {"sum": {"field": "risk_score"}},
                     "last_time": {"max": {"field": "detect_time"}},
                     "top_rule": {"terms": {"field": "rule_hits", "size": 1}},
@@ -223,7 +223,7 @@ def page_user_risk(storage: ElasticStorage) -> None:
         top_rule_buckets = bucket.get("top_rule", {}).get("buckets", [])
         rows.append(
             {
-                "username": bucket.get("key"),
+                "user_id": bucket.get("key"),
                 "异常数量": bucket.get("alert_count", {}).get("value", 0),
                 "高危数量": bucket.get("high_count", {}).get("doc_count", 0),
                 "风险分": bucket.get("risk_score", {}).get("value", 0),

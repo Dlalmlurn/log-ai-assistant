@@ -32,7 +32,7 @@ class DailyReportBuilder:
                 "bool": {
                     "must": [
                         {"range": {"detect_time": {"gte": start.isoformat(), "lt": end.isoformat()}}},
-                        {"term": {"risk_level": "高"}},
+                        {"term": {"risk_level": "high"}},
                     ]
                 }
             },
@@ -82,7 +82,7 @@ class DailyReportBuilder:
             "query": {"range": {"detect_time": {"gte": start.isoformat(), "lt": end.isoformat()}}},
             "aggs": {
                 "rule_hits": {"terms": {"field": "rule_hits", "size": 5}},
-                "users": {"terms": {"field": "username", "size": 5}},
+                "users": {"terms": {"field": "user_id", "size": 5}},
             },
         }
         agg_resp = self.storage.aggregate(settings.elasticsearch_alert_index, agg_body)
@@ -155,7 +155,7 @@ class DailyReportBuilder:
         if typical_alerts:
             for item in typical_alerts[:5]:
                 lines.append(
-                    f"- [{item.get('risk_level')}] {item.get('username')} {item.get('rule_hits')} @ {item.get('detect_time')}"
+                    f"- [{item.get('risk_level')}] {item.get('user_id')} {item.get('rule_hits')} @ {item.get('detect_time')}"
                 )
         else:
             lines.append("- 无")

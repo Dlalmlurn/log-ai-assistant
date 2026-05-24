@@ -22,8 +22,8 @@ import {
 
 import { ApiRequestError, fetchAlertDetail, fetchAlerts, fetchHealth, fetchLogs } from "./api";
 import type {
-  AlertDetailResponse,
-  AlertEvent,
+  AnomalyDetailResponse,
+  AnomalyEvent,
   AlertsQuery,
   HealthResponse,
   LogsQuery,
@@ -43,9 +43,9 @@ type LoadState<T> = {
 
 const initialLogsQuery: LogsQuery = {
   source_type: "",
-  username: "",
+  user_id: "",
   src_ip: "",
-  status: "",
+  result: "",
   start_time: "",
   end_time: "",
   limit: 50,
@@ -58,22 +58,24 @@ const sourceTypes: Array<{ label: string; value: SourceType | "" }> = [
   { label: "OA", value: "oa" },
   { label: "API", value: "api" },
   { label: "System", value: "system" },
+  { label: "File", value: "file" },
+  { label: "Database", value: "database" },
   { label: "Security device", value: "security_device" }
 ];
 
-const statusOptions = ["", "success", "failed", "blocked", "error"];
-const alertStatusOptions = ["", "new", "analyzed", "closed"];
+const resultOptions = ["", "success", "fail", "denied", "error"];
+const alertStatusOptions = ["", "new", "investigating", "closed", "false_positive"];
 const riskLevelOptions: Array<{ label: string; value: RiskLevel | "" }> = [
   { label: "All risk levels", value: "" },
-  { label: "低", value: "低" },
-  { label: "中", value: "中" },
-  { label: "高", value: "高" },
-  { label: "紧急", value: "紧急" }
+  { label: "Low", value: "low" },
+  { label: "Medium", value: "medium" },
+  { label: "High", value: "high" },
+  { label: "Critical", value: "critical" }
 ];
 
 const initialAlertsQuery: AlertsQuery = {
   risk_level: "",
-  username: "",
+  user_id: "",
   rule: "",
   status: "",
   start_time: "",
@@ -388,11 +390,11 @@ function RealtimeLogsPage() {
         </label>
 
         <label>
-          <span>Username</span>
+          <span>User ID</span>
           <input
-            value={draft.username}
+            value={draft.user_id}
             placeholder="alice"
-            onChange={(event) => setDraft((current) => ({ ...current, username: event.target.value }))}
+            onChange={(event) => setDraft((current) => ({ ...current, user_id: event.target.value }))}
           />
         </label>
 
@@ -406,11 +408,11 @@ function RealtimeLogsPage() {
         </label>
 
         <label>
-          <span>Status</span>
-          <select value={draft.status} onChange={(event) => setDraft((current) => ({ ...current, status: event.target.value }))}>
-            {statusOptions.map((option) => (
+          <span>Result</span>
+          <select value={draft.result} onChange={(event) => setDraft((current) => ({ ...current, result: event.target.value as LogsQuery["result"] }))}>
+            {resultOptions.map((option) => (
               <option key={option || "all"} value={option}>
-                {option || "All statuses"}
+                {option || "All results"}
               </option>
             ))}
           </select>
@@ -480,7 +482,7 @@ function RealtimeLogsPage() {
               <th>User</th>
               <th>Source IP</th>
               <th>Action</th>
-              <th>Status</th>
+              <th>Result</th>
               <th>Message</th>
               <th>Risk tags</th>
             </tr>
@@ -493,11 +495,11 @@ function RealtimeLogsPage() {
                   <small>{log.event_id}</small>
                 </td>
                 <td>{formatSource(log.source_type)}</td>
-                <td>{log.username || "unknown"}</td>
+                <td>{log.user_id || "unknown"}</td>
                 <td>{log.src_ip || "n/a"}</td>
                 <td>{log.action}</td>
                 <td>
-                  <span className={`status-chip ${statusTone(log.status)}`}>{log.status}</span>
+                  <span className={`status-chip ${statusTone(log.result)}`}>{log.result}</span>
                 </td>
                 <td className="message-cell">{log.message}</td>
                 <td>
@@ -543,13 +545,13 @@ function AlertsPage() {
   const [query, setQuery] = useState<AlertsQuery>(initialAlertsQuery);
   const [draft, setDraft] = useState<AlertsQuery>(initialAlertsQuery);
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
-  const [listState, setListState] = useState<LoadState<{ items: AlertEvent[]; total: number }>>({
+  const [listState, setListState] = useState<LoadState<{ items: AnomalyEvent[]; total: number }>>({
     data: null,
     loading: true,
     error: null,
     updatedAt: null
   });
-  const [detailState, setDetailState] = useState<LoadState<AlertDetailResponse>>({
+  const [detailState, setDetailState] = useState<LoadState<AnomalyDetailResponse>>({
     data: null,
     loading: false,
     error: null,
@@ -567,10 +569,10 @@ function AlertsPage() {
           updatedAt: new Date()
         });
         setSelectedAlertId((current) => {
-          if (current && data.items.some((alert) => alert.alert_id === current)) {
+          if (current && data.items.some((alert) => alert.event_id === current)) {
             return current;
           }
-          return data.items[0]?.alert_id ?? null;
+          return data.items[0]?.event_id ?? null;
         });
       })
       .catch((error: unknown) => {
@@ -668,11 +670,11 @@ function AlertsPage() {
         </label>
 
         <label>
-          <span>Username</span>
+          <span>User ID</span>
           <input
-            value={draft.username}
+            value={draft.user_id}
             placeholder="alice"
-            onChange={(event) => setDraft((current) => ({ ...current, username: event.target.value }))}
+            onChange={(event) => setDraft((current) => ({ ...current, user_id: event.target.value }))}
           />
         </label>
 
@@ -767,26 +769,26 @@ function AlertsPage() {
               <tbody>
                 {listState.data?.items.map((alert) => (
                   <tr
-                    key={alert.alert_id}
-                    className={selectedAlertId === alert.alert_id ? "selected-row" : ""}
+                    key={alert.event_id}
+                    className={selectedAlertId === alert.event_id ? "selected-row" : ""}
                     tabIndex={0}
-                    onClick={() => setSelectedAlertId(alert.alert_id)}
+                    onClick={() => setSelectedAlertId(alert.event_id)}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
-                        setSelectedAlertId(alert.alert_id);
+                        setSelectedAlertId(alert.event_id);
                       }
                     }}
                   >
                     <td>
                       <time dateTime={alert.detect_time}>{formatDateTime(alert.detect_time)}</time>
-                      <small>{alert.alert_id}</small>
+                      <small>{alert.event_id}</small>
                     </td>
                     <td>
                       <span className={`risk-chip ${riskTone(alert.risk_level)}`}>{alert.risk_level}</span>
                       <small>score {alert.risk_score}</small>
                     </td>
-                    <td>{alert.username || "unknown"}</td>
+                    <td>{alert.user_id || "unknown"}</td>
                     <td>{alert.src_ip || "n/a"}</td>
                     <td>
                       <div className="tag-list">
@@ -838,7 +840,7 @@ function AlertDetailPanel({
   state,
   selectedAlertId
 }: {
-  state: LoadState<AlertDetailResponse>;
+  state: LoadState<AnomalyDetailResponse>;
   selectedAlertId: string | null;
 }) {
   const detail = state.data;
@@ -856,9 +858,9 @@ function AlertDetailPanel({
       <div className="detail-panel-header">
         <div>
           <span className="eyebrow">Alert detail</span>
-          <h2>{detail?.alert.alert_id ?? selectedAlertId}</h2>
+          <h2>{detail?.anomaly.event_id ?? selectedAlertId}</h2>
         </div>
-        {detail ? <StatusPill ok={detail.alert.status === "analyzed"} label={detail.alert.status} /> : null}
+        {detail ? <StatusPill ok={detail.anomaly.ai_status === "analyzed"} label={detail.anomaly.ai_status} /> : null}
       </div>
 
       {state.error ? <ErrorBanner message={state.error} /> : null}
@@ -895,7 +897,7 @@ function AlertDetailPanel({
             ) : (
               <p className="muted">No baseline deviations returned.</p>
             )}
-            <JsonBlock value={detail.alert.evidence} />
+            <JsonBlock value={detail.anomaly.evidence} />
           </section>
 
           <section className="detail-section">
@@ -928,10 +930,14 @@ function AlertDetailPanel({
 
           <section className="detail-section">
             <div className="detail-section-title">
-              <h3>AI Report</h3>
-              <span>{isEmptyRecord(detail.ai_report) ? "not generated" : "stored"}</span>
+              <h3>AI Judgement</h3>
+              <span>{isEmptyRecord(detail.ai_judgement) ? "not generated" : "stored"}</span>
             </div>
-            {isEmptyRecord(detail.ai_report) ? <p className="muted">No AI report returned for this alert.</p> : <JsonBlock value={detail.ai_report} />}
+            {isEmptyRecord(detail.ai_judgement) ? (
+              <p className="muted">No AI judgement returned for this alert.</p>
+            ) : (
+              <JsonBlock value={detail.ai_judgement} />
+            )}
           </section>
         </div>
       ) : null}
@@ -1104,13 +1110,13 @@ function alertStatusTone(status: string): string {
 }
 
 function riskTone(riskLevel: RiskLevel): string {
-  if (riskLevel === "紧急") {
+  if (riskLevel === "critical") {
     return "critical";
   }
-  if (riskLevel === "高") {
+  if (riskLevel === "high") {
     return "high";
   }
-  if (riskLevel === "中") {
+  if (riskLevel === "medium") {
     return "medium";
   }
   return "low";

@@ -19,7 +19,7 @@ from src.detection import detect_batch
 from src.health import get_cli_health_payload
 from src.parser import normalize_raw_record, run_raw_to_parsed_worker
 from src.report import generate_daily_report
-from src.schemas import AlertEvent, NormalizedLog
+from src.schemas import AnomalyEvent, NormalizedLog
 from src.storage import ElasticStorage, KafkaToElasticConsumer
 from src.ueba import build_and_store_baselines
 
@@ -152,9 +152,9 @@ def cmd_detect(args: argparse.Namespace) -> None:
     storage = ElasticStorage()
     logs = storage.fetch_recent_logs(hours=args.hours, size=args.size)
     normalized = [NormalizedLog.model_validate(item) for item in logs]
-    alerts = detect_batch(normalized)
-    alert_docs = [a.model_dump(mode="json") for a in alerts]
-    storage.bulk_index(settings.elasticsearch_alert_index, alert_docs, id_field="alert_id")
+    anomalies = detect_batch(normalized)
+    alert_docs = [a.model_dump(mode="json") for a in anomalies]
+    storage.bulk_index(settings.elasticsearch_alert_index, alert_docs, id_field="event_id")
 
     producer = KafkaProducer(
         bootstrap_servers=settings.kafka_bootstrap_servers,
@@ -165,7 +165,7 @@ def cmd_detect(args: argparse.Namespace) -> None:
     producer.flush()
     producer.close()
 
-    print(f"offline detect finished, alerts={len(alerts)}")
+    print(f"offline detect finished, anomalies={len(anomalies)}")
 
 
 def cmd_analyze_alerts(args: argparse.Namespace) -> None:
@@ -174,7 +174,7 @@ def cmd_analyze_alerts(args: argparse.Namespace) -> None:
 
     query = {
         "bool": {
-            "must_not": [{"exists": {"field": "llm_analysis_id"}}],
+            "must_not": [{"term": {"ai_status": "analyzed"}}],
         }
     }
     pending = storage.search(
@@ -195,12 +195,12 @@ def cmd_analyze_alerts(args: argparse.Namespace) -> None:
 
     analyzed = 0
     for item in pending:
-        alert = AlertEvent.model_validate(item)
+        alert = AnomalyEvent.model_validate(item)
         baseline = {}
-        if alert.username:
+        if alert.user_id:
             rows = storage.search(
                 settings.elasticsearch_baseline_index,
-                query={"term": {"username": alert.username}},
+                query={"term": {"user_id": alert.user_id}},
                 size=1,
             )
             baseline = rows[0] if rows else {}
@@ -211,13 +211,13 @@ def cmd_analyze_alerts(args: argparse.Namespace) -> None:
             size=100,
         )
 
-        report = analyzer.analyze(alert=alert, baseline=baseline, related_logs=related_logs)
+        report = analyzer.analyze(event=alert, baseline=baseline, related_logs=related_logs)
         report_doc = report.model_dump(mode="json")
-        storage.index_document(settings.elasticsearch_ai_index, report_doc, doc_id=report.ai_report_id)
+        storage.index_document(settings.elasticsearch_ai_index, report_doc, doc_id=report.judgement_id)
         storage.update_document(
             settings.elasticsearch_alert_index,
-            alert.alert_id,
-            {"llm_analysis_id": report.ai_report_id, "status": "analyzed"},
+            alert.event_id,
+            {"ai_status": "analyzed"},
         )
         producer.send(settings.kafka_ai_topic, report_doc)
         analyzed += 1

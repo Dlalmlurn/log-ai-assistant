@@ -7,7 +7,7 @@ from kafka import KafkaConsumer, KafkaProducer
 
 from src.config import settings
 from src.detection import RuleEngine
-from src.schemas import AlertEvent, NormalizedLog
+from src.schemas import AnomalyEvent, NormalizedLog
 from src.storage.elastic_client import ElasticStorage
 
 
@@ -62,19 +62,21 @@ class KafkaToElasticConsumer:
         self.storage.index_document(settings.elasticsearch_log_index, doc, doc_id=log.event_id)
 
         generated = self.rule_engine.evaluate_log(log)
-        for alert in generated:
-            alert_doc = alert.model_dump(mode="json")
-            self.storage.index_document(settings.elasticsearch_alert_index, alert_doc, doc_id=alert.alert_id)
-            self.alert_producer.send(settings.kafka_alert_topic, alert_doc)
+        for anomaly in generated:
+            anomaly_doc = anomaly.model_dump(mode="json")
+            self.storage.index_document(settings.elasticsearch_alert_index, anomaly_doc, doc_id=anomaly.event_id)
+            self.alert_producer.send(settings.kafka_alert_topic, anomaly_doc)
         return 1 + len(generated)
 
     def _handle_alert(self, payload: dict) -> int:
         if "detect_time" not in payload:
             payload["detect_time"] = datetime.now(timezone.utc).isoformat()
-        alert = AlertEvent.model_validate(payload)
+        if "created_at" not in payload:
+            payload["created_at"] = datetime.now(timezone.utc).isoformat()
+        alert = AnomalyEvent.model_validate(payload)
         self.storage.index_document(
             settings.elasticsearch_alert_index,
             alert.model_dump(mode="json"),
-            doc_id=alert.alert_id,
+            doc_id=alert.event_id,
         )
         return 1

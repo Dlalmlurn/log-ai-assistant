@@ -35,12 +35,15 @@ def to_parsed_json(raw: str) -> str:
             "event_id": "parse-error",
             "event_time": "1970-01-01T00:00:00Z",
             "ingest_time": "1970-01-01T00:00:00Z",
+            "tenant_id": "default",
             "source_type": "system",
+            "log_type": "parse_error",
             "action": "access",
-            "status": "error",
+            "result": "error",
             "message": f"parse_error: {exc}",
-            "raw_message": raw,
+            "raw_log": raw,
             "risk_tags": ["parse_error"],
+            "attrs": {"error": str(exc)},
         }
         return json.dumps(err, ensure_ascii=False)
 

@@ -1,5 +1,6 @@
-export type SourceType = "vpn" | "oa" | "api" | "system" | "security_device";
-export type RiskLevel = "低" | "中" | "高" | "紧急";
+export type SourceType = "vpn" | "oa" | "api" | "system" | "file" | "database" | "security_device";
+export type RiskLevel = "low" | "medium" | "high" | "critical";
+export type LogResult = "success" | "fail" | "denied" | "error";
 
 export type HealthResponse = {
   kafka: boolean;
@@ -14,77 +15,122 @@ export type NormalizedLog = {
   event_id: string;
   event_time: string;
   ingest_time: string;
+  tenant_id: string;
   source_type: SourceType;
-  username?: string | null;
+  log_type: string;
+  user_id?: string | null;
+  account_type?: string | null;
+  user_role?: string | null;
+  department?: string | null;
+  host?: string | null;
   src_ip?: string | null;
   src_port?: number | null;
   dst_ip?: string | null;
   dst_port?: number | null;
+  geo: Record<string, unknown>;
   action: string;
+  object_type?: string | null;
+  object_id?: string | null;
   resource?: string | null;
-  status: string;
-  http_method?: string | null;
+  result: LogResult;
+  severity: number;
   user_agent?: string | null;
-  message: string;
-  raw_message: string;
-  risk_tags: string[];
+  protocol?: string | null;
+  auth_method?: string | null;
+  session_id?: string | null;
   trace_id?: string | null;
-  original_fields: Record<string, unknown>;
+  scenario_id?: string | null;
+  scenario_type?: string | null;
+  attack_chain_id?: string | null;
+  step_index?: number | null;
+  injected_label?: string | null;
+  message: string;
+  raw_log: string;
+  risk_tags: string[];
+  attrs: Record<string, unknown>;
 };
 
-export type AlertEvent = {
-  alert_id: string;
+export type AnomalyEvent = {
+  event_id: string;
   event_time: string;
   detect_time: string;
-  username?: string | null;
+  tenant_id: string;
+  user_id?: string | null;
   src_ip?: string | null;
-  source_type: SourceType;
-  risk_level: RiskLevel;
+  host?: string | null;
+  source_type?: SourceType | null;
+  action?: string | null;
+  object_type?: string | null;
+  object_id?: string | null;
+  attack_type?: string | null;
   risk_score: number;
+  risk_level: RiskLevel;
+  risk_components: Record<string, unknown>;
   rule_hits: string[];
+  baseline_deviations: Array<Record<string, unknown>>;
+  reason_codes: string[];
   evidence: Record<string, unknown>;
   related_event_ids: string[];
-  related_logs_summary: string;
-  status: string;
-  llm_analysis_id?: string | null;
+  scenario_id?: string | null;
+  scenario_type?: string | null;
+  attack_chain_id?: string | null;
+  ai_status: "not_required" | "pending" | "analyzed" | "failed";
+  status: "new" | "investigating" | "closed" | "false_positive";
+  created_at: string;
 };
 
 export type UserBaseline = {
-  username: string;
-  active_hours: string[];
-  common_ips: string[];
-  common_user_agents: string[];
-  avg_api_calls_per_minute: number;
-  common_resources: string[];
-  failed_login_count_7d: number;
-  sensitive_access_rate: number;
-  updated_at: string;
+  baseline_date: string;
+  tenant_id: string;
+  user_id: string;
+  model_version: string;
+  trained_from: string;
+  trained_to: string;
+  sample_days: number;
+  sample_count: number;
+  baseline_confidence: number;
+  who_profile: Record<string, unknown>;
+  time_profile: Record<string, unknown>;
+  location_profile: Record<string, unknown>;
+  access_profile: Record<string, unknown>;
+  volume_profile: Record<string, unknown>;
+  result_profile: Record<string, unknown>;
+  why_profile: Record<string, unknown>;
+  fallback_level?: "none" | "peer_group" | "department" | "global";
+  created_at: string;
 };
 
-export type AIReport = {
-  ai_report_id: string;
-  alert_id: string;
+export type AIJudgement = {
+  judgement_id: string;
+  event_id: string;
   created_at: string;
-  attack_type: string;
+  model_name: string;
+  model_version?: string | null;
   risk_level: RiskLevel;
-  reason: string;
-  suggestion: string;
+  attack_type: string;
+  judgement: string;
+  key_reasons: string[];
+  recommended_actions: string[];
   confidence: number;
-  next_steps: string[];
+  feedback_suggestions: Record<string, unknown>;
   raw_response: Record<string, unknown>;
+  is_mock: boolean;
 };
 
 export type EvidenceChain = {
   rule_hits: string[];
   baseline_deviations: string[];
+  reason_codes: string[];
+  risk_components: Record<string, unknown>;
+  ai_status: "not_required" | "pending" | "analyzed" | "failed";
   risk_reason: string;
 };
 
-export type AlertDetailResponse = {
-  alert: AlertEvent;
+export type AnomalyDetailResponse = {
+  anomaly: AnomalyEvent;
   baseline: Record<string, unknown>;
   related_logs: NormalizedLog[];
-  ai_report: Record<string, unknown>;
+  ai_judgement: Record<string, unknown>;
   evidence_chain: EvidenceChain;
 };
 
@@ -117,9 +163,9 @@ export type ListResponse<T> = {
 
 export type LogsQuery = {
   source_type?: SourceType | "";
-  username?: string;
+  user_id?: string;
   src_ip?: string;
-  status?: string;
+  result?: LogResult | "";
   start_time?: string;
   end_time?: string;
   limit: number;
@@ -128,7 +174,7 @@ export type LogsQuery = {
 
 export type AlertsQuery = {
   risk_level?: RiskLevel | "";
-  username?: string;
+  user_id?: string;
   rule?: string;
   status?: string;
   start_time?: string;

@@ -12,16 +12,19 @@ api_app_module = importlib.import_module("src.api.app")
 
 AI_REPORT_DOC = {
     "_id": "es-internal-id",
-    "ai_report_id": "ai-1",
-    "alert_id": "alert-1",
+    "judgement_id": "ai-1",
+    "event_id": "anom-1",
     "created_at": "2026-05-13T10:03:00Z",
+    "model_name": "mock-security-analyst",
     "attack_type": "账号接管",
-    "risk_level": "高",
-    "reason": "New IP followed by export.",
-    "suggestion": "Review account activity.",
+    "risk_level": "high",
+    "judgement": "New IP followed by export.",
+    "key_reasons": ["new_source_then_sensitive_access"],
+    "recommended_actions": ["Review account activity."],
     "confidence": 0.9,
-    "next_steps": ["disable session"],
+    "feedback_suggestions": {},
     "raw_response": {},
+    "is_mock": True,
 }
 
 DAILY_REPORT_DOC = {
@@ -78,7 +81,7 @@ def test_list_ai_reports_queries_ai_index_with_pagination():
     response = list_ai_reports(limit=20, offset=10, storage=storage)
     payload = response.model_dump(mode="json")
 
-    assert payload["items"][0]["ai_report_id"] == "ai-1"
+    assert payload["items"][0]["judgement_id"] == "ai-1"
     assert "_id" not in payload["items"][0]
     assert response.total == 5
     assert response.limit == 20
@@ -211,7 +214,7 @@ def test_ai_reports_openapi_binds_contract():
     operation = app.openapi()["paths"]["/api/v1/ai-reports"]["get"]
 
     assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
-        "$ref": "#/components/schemas/AIReportListResponse"
+        "$ref": "#/components/schemas/AIJudgementListResponse"
     }
     assert operation["responses"]["500"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ErrorResponse"

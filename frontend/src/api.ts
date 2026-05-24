@@ -1,7 +1,7 @@
 import type {
-  AIReport,
-  AlertDetailResponse,
-  AlertEvent,
+  AIJudgement,
+  AnomalyDetailResponse,
+  AnomalyEvent,
   AlertsQuery,
   ApiError,
   BaselineRebuildResponse,
@@ -43,16 +43,16 @@ export async function fetchLog(eventId: string, signal?: AbortSignal): Promise<N
   return apiFetch<NormalizedLog>(`/api/v1/logs/${encodeURIComponent(eventId)}`, { signal });
 }
 
-export async function fetchAlerts(query: AlertsQuery, signal?: AbortSignal): Promise<ListResponse<AlertEvent>> {
-  return apiFetch<ListResponse<AlertEvent>>(withQuery("/api/v1/alerts", query), { signal });
+export async function fetchAlerts(query: AlertsQuery, signal?: AbortSignal): Promise<ListResponse<AnomalyEvent>> {
+  return apiFetch<ListResponse<AnomalyEvent>>(withQuery("/api/v1/alerts", query), { signal });
 }
 
-export async function fetchAlertDetail(alertId: string, signal?: AbortSignal): Promise<AlertDetailResponse> {
-  return apiFetch<AlertDetailResponse>(`/api/v1/alerts/${encodeURIComponent(alertId)}`, { signal });
+export async function fetchAlertDetail(alertId: string, signal?: AbortSignal): Promise<AnomalyDetailResponse> {
+  return apiFetch<AnomalyDetailResponse>(`/api/v1/alerts/${encodeURIComponent(alertId)}`, { signal });
 }
 
-export async function analyzeAlert(alertId: string, signal?: AbortSignal): Promise<AIReport> {
-  return apiFetch<AIReport>(`/api/v1/alerts/${encodeURIComponent(alertId)}/analyze`, {
+export async function analyzeAlert(alertId: string, signal?: AbortSignal): Promise<AIJudgement> {
+  return apiFetch<AIJudgement>(`/api/v1/alerts/${encodeURIComponent(alertId)}/analyze`, {
     method: "POST",
     signal
   });
@@ -65,8 +65,8 @@ export async function fetchBaselines(
   return apiFetch<ListResponse<UserBaseline>>(withQuery("/api/v1/baselines", query), { signal });
 }
 
-export async function fetchBaseline(username: string, signal?: AbortSignal): Promise<UserBaseline> {
-  return apiFetch<UserBaseline>(`/api/v1/baselines/${encodeURIComponent(username)}`, { signal });
+export async function fetchBaseline(userId: string, signal?: AbortSignal): Promise<UserBaseline> {
+  return apiFetch<UserBaseline>(`/api/v1/baselines/${encodeURIComponent(userId)}`, { signal });
 }
 
 export async function rebuildBaselines(signal?: AbortSignal): Promise<BaselineRebuildResponse> {
@@ -79,8 +79,8 @@ export async function rebuildBaselines(signal?: AbortSignal): Promise<BaselineRe
 export async function fetchAIReports(
   query: PaginationQuery,
   signal?: AbortSignal
-): Promise<ListResponse<AIReport>> {
-  return apiFetch<ListResponse<AIReport>>(withQuery("/api/v1/ai-reports", query), { signal });
+): Promise<ListResponse<AIJudgement>> {
+  return apiFetch<ListResponse<AIJudgement>>(withQuery("/api/v1/ai-reports", query), { signal });
 }
 
 export async function fetchDailyReports(
