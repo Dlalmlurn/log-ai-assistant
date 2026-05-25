@@ -45,6 +45,83 @@ PARTITION BY toYYYYMM(event_time)
 ORDER BY (tenant_id, event_date, user_id, src_ip, source_type, event_time)
 TTL toDateTime(event_time) + INTERVAL 90 DAY DELETE;
 
+CREATE TABLE IF NOT EXISTS log_ai.parsed_logs_kafka_queue
+(
+    raw String
+)
+ENGINE = Kafka
+SETTINGS
+    kafka_broker_list = 'kafka:9092',
+    kafka_topic_list = 'parsed_logs',
+    kafka_group_name = 'clickhouse-parsed-logs',
+    kafka_format = 'JSONAsString',
+    kafka_num_consumers = 1,
+    kafka_skip_broken_messages = 1000;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS log_ai.parsed_logs_to_security_logs
+TO log_ai.security_logs
+AS
+SELECT
+    coalesce(nullIf(JSONExtractString(raw, 'event_id'), ''), toString(generateUUIDv4())) AS event_id,
+    coalesce(parseDateTime64BestEffortOrNull(JSONExtractString(raw, 'event_time'), 3), now64(3)) AS event_time,
+    coalesce(parseDateTime64BestEffortOrNull(JSONExtractString(raw, 'ingest_time'), 3), now64(3)) AS ingest_time,
+    coalesce(nullIf(JSONExtractString(raw, 'tenant_id'), ''), 'default') AS tenant_id,
+    coalesce(nullIf(JSONExtractString(raw, 'source_type'), ''), 'system') AS source_type,
+    coalesce(nullIf(JSONExtractString(raw, 'log_type'), ''), '') AS log_type,
+    coalesce(nullIf(JSONExtractString(raw, 'user_id'), ''), '') AS user_id,
+    coalesce(nullIf(JSONExtractString(raw, 'account_type'), ''), 'unknown') AS account_type,
+    coalesce(nullIf(JSONExtractString(raw, 'user_role'), ''), '') AS user_role,
+    coalesce(nullIf(JSONExtractString(raw, 'department'), ''), '') AS department,
+    coalesce(nullIf(JSONExtractString(raw, 'host'), ''), '') AS host,
+    coalesce(nullIf(JSONExtractString(raw, 'src_ip'), ''), '') AS src_ip,
+    JSONExtract(raw, 'src_port', 'Nullable(UInt16)') AS src_port,
+    coalesce(nullIf(JSONExtractString(raw, 'dst_ip'), ''), '') AS dst_ip,
+    JSONExtract(raw, 'dst_port', 'Nullable(UInt16)') AS dst_port,
+    if(geo_raw IN ('', 'null'), '{}', geo_raw) AS geo,
+    coalesce(nullIf(JSONExtractString(raw, 'action'), ''), 'access') AS action,
+    coalesce(nullIf(JSONExtractString(raw, 'object_type'), ''), '') AS object_type,
+    coalesce(nullIf(JSONExtractString(raw, 'object_id'), ''), '') AS object_id,
+    coalesce(nullIf(JSONExtractString(raw, 'resource'), ''), '') AS resource,
+    coalesce(nullIf(JSONExtractString(raw, 'result'), ''), 'error') AS result,
+    JSONExtract(raw, 'severity', 'UInt8') AS severity,
+    coalesce(nullIf(JSONExtractString(raw, 'user_agent'), ''), '') AS user_agent,
+    coalesce(nullIf(JSONExtractString(raw, 'protocol'), ''), '') AS protocol,
+    coalesce(nullIf(JSONExtractString(raw, 'auth_method'), ''), '') AS auth_method,
+    coalesce(nullIf(JSONExtractString(raw, 'session_id'), ''), '') AS session_id,
+    coalesce(nullIf(JSONExtractString(raw, 'trace_id'), ''), '') AS trace_id,
+    coalesce(nullIf(JSONExtractString(raw, 'scenario_id'), ''), '') AS scenario_id,
+    coalesce(nullIf(JSONExtractString(raw, 'scenario_type'), ''), '') AS scenario_type,
+    coalesce(nullIf(JSONExtractString(raw, 'attack_chain_id'), ''), '') AS attack_chain_id,
+    JSONExtract(raw, 'step_index', 'Nullable(UInt16)') AS step_index,
+    coalesce(nullIf(JSONExtractString(raw, 'injected_label'), ''), '') AS injected_label,
+    coalesce(nullIf(JSONExtractString(raw, 'message'), ''), raw) AS message,
+    coalesce(nullIf(JSONExtractString(raw, 'raw_log'), ''), raw) AS raw_log,
+    if(JSONHas(raw, 'risk_tags'), JSONExtract(raw, 'risk_tags', 'Array(String)'), emptyArrayString()) AS risk_tags,
+    if(attrs_raw IN ('', 'null'), '{}', attrs_raw) AS attrs
+FROM
+(
+    SELECT
+        raw,
+        JSONExtractRaw(raw, 'geo') AS geo_raw,
+        JSONExtractRaw(raw, 'attrs') AS attrs_raw
+    FROM log_ai.parsed_logs_kafka_queue
+);
+
+CREATE TABLE IF NOT EXISTS log_ai.user_seen_sources
+(
+    tenant_id LowCardinality(String) DEFAULT 'default',
+    user_id String,
+    source_type LowCardinality(String),
+    source_key String,
+    first_seen_time DateTime64(3),
+    last_seen_time DateTime64(3),
+    seen_count UInt32 DEFAULT 0,
+    created_at DateTime DEFAULT now(),
+    updated_at DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (tenant_id, user_id, source_type, source_key);
+
 CREATE TABLE IF NOT EXISTS log_ai.anomaly_events
 (
     event_id String,
@@ -176,3 +253,63 @@ CREATE TABLE IF NOT EXISTS log_ai.ai_feedback
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (tenant_id, created_at, target_component, review_status);
+
+CREATE TABLE IF NOT EXISTS log_ai.daily_security_reports
+(
+    report_date Date,
+    tenant_id LowCardinality(String) DEFAULT 'default',
+    total_logs UInt64 DEFAULT 0,
+    anomaly_count UInt64 DEFAULT 0,
+    high_count UInt64 DEFAULT 0,
+    critical_count UInt64 DEFAULT 0,
+    overall_score Float32 DEFAULT 0,
+    top_risk_users Array(String) DEFAULT [],
+    top_attack_types Array(String) DEFAULT [],
+    key_events Array(String) DEFAULT [],
+    ai_summary String DEFAULT '',
+    recommended_actions Array(String) DEFAULT [],
+    markdown_body String DEFAULT '',
+    created_at DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(created_at)
+PARTITION BY toYYYYMM(report_date)
+ORDER BY (tenant_id, report_date);
+
+CREATE TABLE IF NOT EXISTS log_ai.data_quality_metrics
+(
+    metric_date Date,
+    tenant_id LowCardinality(String) DEFAULT 'default',
+    source_type LowCardinality(String),
+    generated_count UInt64 DEFAULT 0,
+    injected_anomaly_count UInt64 DEFAULT 0,
+    injected_high_risk_count UInt64 DEFAULT 0,
+    raw_logs_count UInt64 DEFAULT 0,
+    parsed_logs_count UInt64 DEFAULT 0,
+    clickhouse_insert_count UInt64 DEFAULT 0,
+    security_logs_count UInt64 DEFAULT 0,
+    raw_size_bytes UInt64 DEFAULT 0,
+    table_size_bytes UInt64 DEFAULT 0,
+    compression_ratio Float32 DEFAULT 0,
+    missing_event_time_rate Float32 DEFAULT 0,
+    missing_user_id_rate Float32 DEFAULT 0,
+    missing_src_ip_rate Float32 DEFAULT 0,
+    missing_action_rate Float32 DEFAULT 0,
+    missing_result_rate Float32 DEFAULT 0,
+    parse_error_rate Float32 DEFAULT 0,
+    created_at DateTime DEFAULT now()
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(metric_date)
+ORDER BY (tenant_id, metric_date, source_type);
+
+CREATE TABLE IF NOT EXISTS log_ai.system_metrics
+(
+    metric_time DateTime,
+    component LowCardinality(String),
+    metric_name LowCardinality(String),
+    metric_value Float64,
+    labels String DEFAULT '{}'
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(metric_time)
+ORDER BY (component, metric_name, metric_time);

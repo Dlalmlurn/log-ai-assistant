@@ -14,7 +14,7 @@ def test_health_response_contract(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "src.health._get_consumer_lag",
-        lambda: {"flink-raw-to-parsed": 0, "flink-parsed-to-clickhouse": 0},
+        lambda: {"flink-raw-to-parsed": 0, "clickhouse-parsed-logs": 0},
     )
 
     status = get_health_status()
@@ -27,7 +27,7 @@ def test_health_response_contract(monkeypatch) -> None:
         "latest_log_ingest_time": "2026-05-13T10:00:00Z",
         "consumer_lag": {
             "flink-raw-to-parsed": 0,
-            "flink-parsed-to-clickhouse": 0,
+            "clickhouse-parsed-logs": 0,
         },
     }
 
@@ -42,7 +42,7 @@ def test_health_api_contract_binding(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "src.health._get_consumer_lag",
-        lambda: {"flink-raw-to-parsed": 3, "flink-parsed-to-clickhouse": 1},
+        lambda: {"flink-raw-to-parsed": 3, "clickhouse-parsed-logs": 1},
     )
 
     paths = {route.path for route in app.routes}
@@ -57,7 +57,7 @@ def test_health_api_contract_binding(monkeypatch) -> None:
         "latest_log_ingest_time": "2026-05-13T10:00:00Z",
         "consumer_lag": {
             "flink-raw-to-parsed": 3,
-            "flink-parsed-to-clickhouse": 1,
+            "clickhouse-parsed-logs": 1,
         },
     }
 
