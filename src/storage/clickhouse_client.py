@@ -701,6 +701,7 @@ def _normalize_limit(limit: int) -> int:
 
 
 def _clickhouse_type(value: Any) -> str:
+    # 一处细节：datetime 需要写在 date 的前面，因为 datetime 是 date 的子类
     if isinstance(value, datetime):
         return "DateTime64(3)"
     if isinstance(value, date):
@@ -711,7 +712,7 @@ def _clickhouse_type(value: Any) -> str:
         return "Float64"
     return "String"
 
-
+# 调用 json_loads 把日志的 json 字段转化为 Python 对象
 def _normalize_log_row(row: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(row)
     for field in LOG_JSON_FIELDS:
@@ -719,6 +720,7 @@ def _normalize_log_row(row: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+# 把表示基线偏离的 json 字段转化为列表，其他的转化为其他 Python 对象
 def _normalize_anomaly_row(row: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(row)
     for field in ANOMALY_JSON_FIELDS:
@@ -727,6 +729,7 @@ def _normalize_anomaly_row(row: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+# 把日报组织成适合接口返回的对象
 def _normalize_daily_report_row(row: dict[str, Any]) -> dict[str, Any]:
     report_date = row.get("report_date")
     recommended_actions = _string_list(row.get("recommended_actions"))
@@ -747,9 +750,11 @@ def _normalize_daily_report_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# 把多行 baseline feature 合并成一个用户基线 profile
 def _baseline_rows_to_profiles(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
     for row in rows:
+        # 构造：用户基线的唯一标识，即 key
         key = (
             row.get("baseline_date"),
             row.get("tenant_id"),
@@ -758,6 +763,7 @@ def _baseline_rows_to_profiles(rows: Sequence[dict[str, Any]]) -> list[dict[str,
             row.get("trained_from"),
             row.get("trained_to"),
         )
+        # 如果字段已经有，key 设为字典中的字段，否则取默认值
         item = grouped.setdefault(
             key,
             {
@@ -781,6 +787,7 @@ def _baseline_rows_to_profiles(rows: Sequence[dict[str, Any]]) -> list[dict[str,
                 "created_at": row.get("created_at"),
             },
         )
+        # 取 max 值保险，一般没问题
         item["sample_days"] = max(int(item.get("sample_days") or 0), int(row.get("sample_days") or 0))
         item["sample_count"] = max(int(item.get("sample_count") or 0), int(row.get("sample_count") or 0))
         item["baseline_confidence"] = max(
@@ -803,6 +810,7 @@ def _baseline_rows_to_profiles(rows: Sequence[dict[str, Any]]) -> list[dict[str,
     return list(grouped.values())
 
 
+# 把 json 字符串转化成字典或者列表
 def _json_loads(value: Any, *, default: Any) -> Any:
     if value is None or value == "":
         return default
@@ -814,12 +822,14 @@ def _json_loads(value: Any, *, default: Any) -> Any:
         return default
 
 
+# 和 loads 相反，python 对象转化为 json 字符串
 def _json_dumps(value: Any) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value if value is not None else {}, ensure_ascii=False, separators=(",", ":"))
 
 
+# 把 string 和 Iterable 转化为列表
 def _string_list(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value] if value else []
@@ -828,12 +838,14 @@ def _string_list(value: Any) -> list[str]:
     return []
 
 
+# 把 Pydantic 对象转化为字典
 def _model_payload(value: Any) -> dict[str, Any]:
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="python")
     return dict(value)
 
 
+# 把字典转化为可以放进数据库对应列的数据结构
 def _row_from_payload(
     payload: dict[str, Any],
     columns: Sequence[str],
@@ -856,6 +868,7 @@ def _row_from_payload(
     return row
 
 
+# 检查传入的内容是否在允许范围内（用 set 的差实现）
 def _assert_allowed_values(values: Sequence[str], allowed: Iterable[str], label: str) -> None:
     allowed_set = set(allowed)
     invalid = sorted(set(values) - allowed_set)
@@ -863,16 +876,21 @@ def _assert_allowed_values(values: Sequence[str], allowed: Iterable[str], label:
         raise ValueError(f"Unsupported {label}: {', '.join(invalid)}")
 
 
+# 从 SELECT 中得到列名字段
 def _parse_select_aliases(sql: str) -> list[str]:
     upper_sql = sql.upper()
     if "SELECT" not in upper_sql or "FROM" not in upper_sql:
         return []
+    # 字符串切片，取 SELECT 和 FROM 之间的字段（本质[:]语法）
     select_sql = sql[upper_sql.index("SELECT") + len("SELECT"):upper_sql.index("FROM")]
     aliases: list[str] = []
     for raw_part in select_sql.split(","):
         part = raw_part.strip()
         if " AS " in part.upper():
+            # 从右边第一个空格切，取右数第一个字段（即 AS 右边的字段，别名）
             aliases.append(part.rsplit(" ", 1)[-1])
+        # 排除诸如 max(count) 这类字段
         elif part and "(" not in part:
+            # 比如 b.tenant_id 执行后得到 tenant_id
             aliases.append(part.split(".")[-1])
     return aliases
