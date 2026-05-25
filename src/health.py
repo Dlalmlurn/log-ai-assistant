@@ -8,7 +8,7 @@ from src.config import settings
 
 CONSUMER_GROUP_TOPICS: dict[str, list[str]] = {
     "flink-raw-to-parsed": [settings.kafka_raw_topic],
-    "flink-parsed-to-clickhouse": [settings.kafka_parsed_topic],
+    "clickhouse-parsed-logs": [settings.kafka_parsed_topic],
 }
 
 
