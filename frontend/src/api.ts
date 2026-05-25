@@ -44,15 +44,15 @@ export async function fetchLog(eventId: string, signal?: AbortSignal): Promise<N
 }
 
 export async function fetchAlerts(query: AlertsQuery, signal?: AbortSignal): Promise<ListResponse<AnomalyEvent>> {
-  return apiFetch<ListResponse<AnomalyEvent>>(withQuery("/api/v1/alerts", query), { signal });
+  return apiFetch<ListResponse<AnomalyEvent>>(withQuery("/api/v1/anomalies", query), { signal });
 }
 
 export async function fetchAlertDetail(alertId: string, signal?: AbortSignal): Promise<AnomalyDetailResponse> {
-  return apiFetch<AnomalyDetailResponse>(`/api/v1/alerts/${encodeURIComponent(alertId)}`, { signal });
+  return apiFetch<AnomalyDetailResponse>(`/api/v1/anomalies/${encodeURIComponent(alertId)}`, { signal });
 }
 
 export async function analyzeAlert(alertId: string, signal?: AbortSignal): Promise<AIJudgement> {
-  return apiFetch<AIJudgement>(`/api/v1/alerts/${encodeURIComponent(alertId)}/analyze`, {
+  return apiFetch<AIJudgement>(`/api/v1/ai/judge/${encodeURIComponent(alertId)}`, {
     method: "POST",
     signal
   });
@@ -62,11 +62,11 @@ export async function fetchBaselines(
   query: PaginationQuery,
   signal?: AbortSignal
 ): Promise<ListResponse<UserBaseline>> {
-  return apiFetch<ListResponse<UserBaseline>>(withQuery("/api/v1/baselines", query), { signal });
+  return apiFetch<ListResponse<UserBaseline>>(withQuery("/api/v1/baselines/users", query), { signal });
 }
 
 export async function fetchBaseline(userId: string, signal?: AbortSignal): Promise<UserBaseline> {
-  return apiFetch<UserBaseline>(`/api/v1/baselines/${encodeURIComponent(userId)}`, { signal });
+  return apiFetch<UserBaseline>(`/api/v1/baselines/users/${encodeURIComponent(userId)}`, { signal });
 }
 
 export async function rebuildBaselines(signal?: AbortSignal): Promise<BaselineRebuildResponse> {
@@ -80,21 +80,21 @@ export async function fetchAIReports(
   query: PaginationQuery,
   signal?: AbortSignal
 ): Promise<ListResponse<AIJudgement>> {
-  return apiFetch<ListResponse<AIJudgement>>(withQuery("/api/v1/ai-reports", query), { signal });
+  return apiFetch<ListResponse<AIJudgement>>(withQuery("/api/v1/ai/judgements", query), { signal });
 }
 
 export async function fetchDailyReports(
   query: PaginationQuery,
   signal?: AbortSignal
 ): Promise<ListResponse<DailyReport>> {
-  return apiFetch<ListResponse<DailyReport>>(withQuery("/api/v1/daily-reports", query), { signal });
+  return apiFetch<ListResponse<DailyReport>>(withQuery("/api/v1/reports/daily", query), { signal });
 }
 
 export async function createDailyReport(
   query: DailyReportCreateQuery = {},
   signal?: AbortSignal
 ): Promise<DailyReport> {
-  return apiFetch<DailyReport>(withQuery("/api/v1/daily-reports", query), {
+  return apiFetch<DailyReport>(withQuery("/api/v1/reports/daily", query), {
     method: "POST",
     signal
   });

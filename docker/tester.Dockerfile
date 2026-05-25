@@ -13,5 +13,6 @@ RUN pip install --no-cache-dir -r requirements/backend.txt -r requirements/test.
 
 COPY src src
 COPY tests tests
+COPY sql sql
 
 CMD ["pytest", "-q"]

@@ -76,7 +76,7 @@ const riskLevelOptions: Array<{ label: string; value: RiskLevel | "" }> = [
 const initialAlertsQuery: AlertsQuery = {
   risk_level: "",
   user_id: "",
-  rule: "",
+  reason_code: "",
   status: "",
   start_time: "",
   end_time: "",
@@ -679,11 +679,11 @@ function AlertsPage() {
         </label>
 
         <label>
-          <span>Rule</span>
+          <span>Reason code</span>
           <input
-            value={draft.rule}
-            placeholder="新IP登录"
-            onChange={(event) => setDraft((current) => ({ ...current, rule: event.target.value }))}
+            value={draft.reason_code}
+            placeholder="new_source_ip"
+            onChange={(event) => setDraft((current) => ({ ...current, reason_code: event.target.value }))}
           />
         </label>
 
@@ -747,7 +747,7 @@ function AlertsPage() {
           <div className="table-toolbar">
             <div>
               <strong>{listState.data?.total.toLocaleString() ?? "0"} alerts</strong>
-              <span>{formatResultRange(query.offset, query.limit, listState.data?.total ?? 0, listState.data?.items.length ?? 0)} from /api/v1/alerts</span>
+              <span>{formatResultRange(query.offset, query.limit, listState.data?.total ?? 0, listState.data?.items.length ?? 0)} from /api/v1/anomalies</span>
             </div>
             <div className="toolbar-meta">
               <span>{listState.updatedAt ? `Updated ${listState.updatedAt.toLocaleTimeString()}` : "Waiting for data"}</span>

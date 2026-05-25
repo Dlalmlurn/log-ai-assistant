@@ -4,14 +4,12 @@ import pytest
 from fastapi import HTTPException
 
 from src.api.app import app, get_baseline_detail, list_baselines, rebuild_baselines
-from src.config import settings
 
 
 api_app_module = importlib.import_module("src.api.app")
 
 
 BASELINE_DOC = {
-    "_id": "baseline-doc-1",
     "baseline_date": "2026-05-13",
     "tenant_id": "default",
     "user_id": "alice",
@@ -24,12 +22,7 @@ BASELINE_DOC = {
     "who_profile": {"user_id": "alice"},
     "time_profile": {"active_hours": ["09:00-18:00"]},
     "location_profile": {"common_ips": ["10.0.0.7"]},
-    "access_profile": {
-        "common_user_agents": ["Chrome"],
-        "common_resources": ["/home", "/api/profile"],
-        "avg_api_calls_per_minute": 2.4,
-        "sensitive_access_rate": 0.02,
-    },
+    "access_profile": {"common_resources": ["/home", "/api/profile"]},
     "volume_profile": {},
     "result_profile": {"failed_login_count_7d": 1},
     "why_profile": {},
@@ -44,47 +37,43 @@ class FakeBaselineStorage:
         self.total = len(self.items) if total is None else total
         self.calls: list[dict[str, object]] = []
 
-    def search_page(self, **kwargs):
-        self.calls.append(kwargs)
+    def list_user_baselines(self, **kwargs):
+        self.calls.append({"method": "list_user_baselines", **kwargs})
         return self.items, self.total
+
+    def get_user_baseline(self, user_id: str, **kwargs):
+        self.calls.append({"method": "get_user_baseline", "user_id": user_id, **kwargs})
+        return self.items[0] if self.items else None
 
 
 class FakeRebuildStorage:
-    def __init__(self) -> None:
-        self.ensure_indices_called = False
-
-    def ensure_indices(self) -> None:
-        self.ensure_indices_called = True
+    pass
 
 
-class FailingBaselineStorage:
-    def search_page(self, **_kwargs):
-        raise RuntimeError("es unavailable")
+class FailingBaselineStorage(FakeBaselineStorage):
+    def list_user_baselines(self, **_kwargs):
+        raise RuntimeError("clickhouse unavailable")
 
-
-class FailingRebuildStorage:
-    def ensure_indices(self) -> None:
-        raise RuntimeError("es unavailable")
+    def get_user_baseline(self, _user_id: str, **_kwargs):
+        raise RuntimeError("clickhouse unavailable")
 
 
 def test_list_baselines_queries_user_baselines_with_pagination() -> None:
     storage = FakeBaselineStorage(total=7)
 
-    response = list_baselines(limit=25, offset=50, storage=storage)
+    response = list_baselines(tenant_id="default", limit=25, offset=50, storage=storage)
     payload = response.model_dump(mode="json")
 
     assert payload["items"][0]["user_id"] == "alice"
-    assert "_id" not in payload["items"][0]
     assert response.total == 7
     assert response.limit == 25
     assert response.offset == 50
     assert storage.calls == [
         {
-            "index": settings.elasticsearch_baseline_index,
-            "query": {"match_all": {}},
+            "method": "list_user_baselines",
+            "tenant_id": "default",
             "limit": 25,
             "offset": 50,
-            "sort": [{"created_at": "desc"}],
         }
     ]
 
@@ -92,46 +81,41 @@ def test_list_baselines_queries_user_baselines_with_pagination() -> None:
 def test_get_baseline_detail_queries_user_baselines_by_user_id() -> None:
     storage = FakeBaselineStorage()
 
-    response = get_baseline_detail(user_id="alice", storage=storage)
+    response = get_baseline_detail(user_id="alice", tenant_id="default", storage=storage)
     payload = response.model_dump(mode="json")
 
     assert payload["user_id"] == "alice"
     assert payload["location_profile"]["common_ips"] == ["10.0.0.7"]
-    assert "_id" not in payload
     assert storage.calls == [
         {
-            "index": settings.elasticsearch_baseline_index,
-            "query": {"term": {"user_id": "alice"}},
-            "limit": 1,
-            "offset": 0,
+            "method": "get_user_baseline",
+            "user_id": "alice",
+            "tenant_id": "default",
         }
     ]
 
 
 def test_get_baseline_detail_returns_clear_404_error_when_missing() -> None:
     with pytest.raises(HTTPException) as exc_info:
-        get_baseline_detail(user_id="missing-user", storage=FakeBaselineStorage(items=[]))
+        get_baseline_detail(user_id="missing-user", tenant_id=None, storage=FakeBaselineStorage(items=[]))
 
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail == {
         "code": "baseline_not_found",
         "message": "User baseline not found",
-        "details": {
-            "index": settings.elasticsearch_baseline_index,
-            "user_id": "missing-user",
-        },
+        "details": {"table": "ueba_user_baseline", "user_id": "missing-user"},
     }
 
 
 def test_baseline_query_failures_return_standard_error_shape() -> None:
     with pytest.raises(HTTPException) as exc_info:
-        list_baselines(storage=FailingBaselineStorage())
+        list_baselines(tenant_id=None, limit=50, offset=0, storage=FailingBaselineStorage())
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == {
-        "code": "elasticsearch_query_failed",
-        "message": "Failed to query user baselines from Elasticsearch",
-        "details": {"index": settings.elasticsearch_baseline_index},
+        "code": "clickhouse_query_failed",
+        "message": "Failed to query user baselines from ClickHouse",
+        "details": {"table": "ueba_user_baseline"},
     }
 
 
@@ -148,7 +132,6 @@ def test_rebuild_baselines_uses_existing_builder_and_returns_count(monkeypatch) 
     response = rebuild_baselines(storage=storage)
 
     assert response.model_dump() == {"rebuilt_count": 3}
-    assert storage.ensure_indices_called is True
     assert calls == [storage]
 
 
@@ -165,30 +148,12 @@ def test_rebuild_baselines_returns_standard_error_shape_when_builder_fails(monke
     assert exc_info.value.detail == {
         "code": "baseline_rebuild_failed",
         "message": "Failed to rebuild user baselines",
-        "details": {
-            "source_index": settings.elasticsearch_log_index,
-            "target_index": settings.elasticsearch_baseline_index,
-        },
-    }
-
-
-def test_rebuild_baselines_returns_standard_error_shape_when_index_setup_fails() -> None:
-    with pytest.raises(HTTPException) as exc_info:
-        rebuild_baselines(storage=FailingRebuildStorage())
-
-    assert exc_info.value.status_code == 500
-    assert exc_info.value.detail == {
-        "code": "baseline_rebuild_failed",
-        "message": "Failed to rebuild user baselines",
-        "details": {
-            "source_index": settings.elasticsearch_log_index,
-            "target_index": settings.elasticsearch_baseline_index,
-        },
+        "details": {"source_table": "security_logs", "target_table": "ueba_user_baseline"},
     }
 
 
 def test_baselines_openapi_binds_contract_and_error_shape() -> None:
-    operation = app.openapi()["paths"]["/api/v1/baselines"]["get"]
+    operation = app.openapi()["paths"]["/api/v1/baselines/users"]["get"]
 
     assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/UserBaselineListResponse"
@@ -210,7 +175,7 @@ def test_baseline_rebuild_openapi_binds_contract_and_error_shape() -> None:
 
 
 def test_baseline_detail_openapi_binds_contract_and_error_shape() -> None:
-    operation = app.openapi()["paths"]["/api/v1/baselines/{user_id}"]["get"]
+    operation = app.openapi()["paths"]["/api/v1/baselines/users/{user_id}"]["get"]
 
     assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/UserBaseline"

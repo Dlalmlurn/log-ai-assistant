@@ -1,17 +1,17 @@
 import importlib
+from datetime import datetime, timezone
 
 import pytest
 from fastapi import HTTPException
 
-from src.api.app import app, list_ai_reports, list_daily_reports, create_daily_report
-from src.config import settings
+from src.api.app import app, create_daily_report, list_ai_reports, list_daily_reports
+from src.schemas import DailyReport
 
 
 api_app_module = importlib.import_module("src.api.app")
 
 
 AI_REPORT_DOC = {
-    "_id": "es-internal-id",
     "judgement_id": "ai-1",
     "event_id": "anom-1",
     "created_at": "2026-05-13T10:03:00Z",
@@ -28,8 +28,7 @@ AI_REPORT_DOC = {
 }
 
 DAILY_REPORT_DOC = {
-    "_id": "es-internal-id",
-    "report_id": "daily-1",
+    "report_id": "default:2026-05-13",
     "date": "2026-05-13",
     "created_at": "2026-05-13T23:00:00Z",
     "overall_score": 85.0,
@@ -50,103 +49,77 @@ class FakeStorage:
         self.items = items if items is not None else []
         self.total = len(self.items) if total is None else total
         self.calls: list[dict] = []
-        self.indexed: list[dict] = []
-        self.ensure_indices_called = False
+        self.inserted_daily: list[dict] = []
 
-    def search_page(self, **kwargs):
-        self.calls.append(kwargs)
+    def list_ai_judgements(self, **kwargs):
+        self.calls.append({"method": "list_ai_judgements", **kwargs})
         return self.items, self.total
 
-    def ensure_indices(self):
-        self.ensure_indices_called = True
+    def list_daily_reports(self, **kwargs):
+        self.calls.append({"method": "list_daily_reports", **kwargs})
+        return self.items, self.total
 
-    def index_document(self, index, document, doc_id=None):
-        self.indexed.append({"index": index, "document": document, "doc_id": doc_id})
-
-
-class FailingStorage:
-    def search_page(self, **_kwargs):
-        raise RuntimeError("es unavailable")
-
-    def ensure_indices(self):
-        raise RuntimeError("es unavailable")
+    def insert_daily_report(self, report, *, tenant_id="default"):
+        self.inserted_daily.append({"report": report, "tenant_id": tenant_id})
 
 
-# --- GET /api/v1/ai-reports ---
+class FailingStorage(FakeStorage):
+    def list_ai_judgements(self, **_kwargs):
+        raise RuntimeError("clickhouse unavailable")
+
+    def list_daily_reports(self, **_kwargs):
+        raise RuntimeError("clickhouse unavailable")
 
 
-def test_list_ai_reports_queries_ai_index_with_pagination():
+def test_list_ai_reports_queries_clickhouse_with_pagination():
     storage = FakeStorage(items=[AI_REPORT_DOC], total=5)
 
-    response = list_ai_reports(limit=20, offset=10, storage=storage)
+    response = list_ai_reports(event_id="anom-1", limit=20, offset=10, storage=storage)
     payload = response.model_dump(mode="json")
 
     assert payload["items"][0]["judgement_id"] == "ai-1"
-    assert "_id" not in payload["items"][0]
     assert response.total == 5
     assert response.limit == 20
     assert response.offset == 10
     assert storage.calls == [
-        {
-            "index": settings.elasticsearch_ai_index,
-            "query": {"match_all": {}},
-            "limit": 20,
-            "offset": 10,
-            "sort": [{"created_at": "desc"}],
-        }
+        {"method": "list_ai_judgements", "event_id": "anom-1", "limit": 20, "offset": 10}
     ]
 
 
-def test_list_ai_reports_returns_standard_error_on_es_failure():
+def test_list_ai_reports_returns_standard_error_on_clickhouse_failure():
     with pytest.raises(HTTPException) as exc_info:
-        list_ai_reports(storage=FailingStorage())
+        list_ai_reports(event_id=None, limit=50, offset=0, storage=FailingStorage())
 
     assert exc_info.value.status_code == 500
-    assert exc_info.value.detail["code"] == "elasticsearch_query_failed"
-    assert exc_info.value.detail["details"]["index"] == settings.elasticsearch_ai_index
+    assert exc_info.value.detail["code"] == "clickhouse_query_failed"
+    assert exc_info.value.detail["details"]["table"] == "ai_judgements"
 
 
-# --- GET /api/v1/daily-reports ---
-
-
-def test_list_daily_reports_queries_daily_index_with_pagination():
+def test_list_daily_reports_queries_clickhouse_with_pagination():
     storage = FakeStorage(items=[DAILY_REPORT_DOC], total=3)
 
-    response = list_daily_reports(limit=10, offset=0, storage=storage)
+    response = list_daily_reports(tenant_id="default", limit=10, offset=0, storage=storage)
     payload = response.model_dump(mode="json")
 
-    assert payload["items"][0]["report_id"] == "daily-1"
-    assert "_id" not in payload["items"][0]
+    assert payload["items"][0]["report_id"] == "default:2026-05-13"
     assert response.total == 3
     assert response.limit == 10
     assert response.offset == 0
     assert storage.calls == [
-        {
-            "index": settings.elasticsearch_daily_index,
-            "query": {"match_all": {}},
-            "limit": 10,
-            "offset": 0,
-            "sort": [{"date": "desc"}],
-        }
+        {"method": "list_daily_reports", "tenant_id": "default", "limit": 10, "offset": 0}
     ]
 
 
-def test_list_daily_reports_returns_standard_error_on_es_failure():
+def test_list_daily_reports_returns_standard_error_on_clickhouse_failure():
     with pytest.raises(HTTPException) as exc_info:
-        list_daily_reports(storage=FailingStorage())
+        list_daily_reports(tenant_id=None, limit=50, offset=0, storage=FailingStorage())
 
     assert exc_info.value.status_code == 500
-    assert exc_info.value.detail["code"] == "elasticsearch_query_failed"
-    assert exc_info.value.detail["details"]["index"] == settings.elasticsearch_daily_index
-
-
-# --- POST /api/v1/daily-reports ---
+    assert exc_info.value.detail["code"] == "clickhouse_query_failed"
+    assert exc_info.value.detail["details"]["table"] == "daily_security_reports"
 
 
 def test_create_daily_report_generates_and_stores_report(monkeypatch):
-    from src.schemas import DailyReport
-    from datetime import datetime, timezone
-
     fake_report = DailyReport(
         report_id="daily-gen-1",
         date="2026-05-13",
@@ -169,14 +142,11 @@ def test_create_daily_report_generates_and_stores_report(monkeypatch):
     monkeypatch.setattr(api_app_module, "generate_daily_report", fake_generate)
     storage = FakeStorage()
 
-    response = create_daily_report(date="2026-05-13", storage=storage)
+    response = create_daily_report(date="2026-05-13", tenant_id="default", storage=storage)
 
     assert response.report_id == "daily-gen-1"
     assert response.date == "2026-05-13"
-    assert storage.ensure_indices_called is True
-    assert len(storage.indexed) == 1
-    assert storage.indexed[0]["index"] == settings.elasticsearch_daily_index
-    assert storage.indexed[0]["doc_id"] == "daily-gen-1"
+    assert storage.inserted_daily == [{"report": fake_report, "tenant_id": "default"}]
 
 
 def test_create_daily_report_returns_error_on_invalid_date(monkeypatch):
@@ -184,10 +154,9 @@ def test_create_daily_report_returns_error_on_invalid_date(monkeypatch):
         raise ValueError("time data 'bad-date' does not match format '%Y-%m-%d'")
 
     monkeypatch.setattr(api_app_module, "generate_daily_report", fake_generate)
-    storage = FakeStorage()
 
     with pytest.raises(HTTPException) as exc_info:
-        create_daily_report(date="bad-date", storage=storage)
+        create_daily_report(date="bad-date", tenant_id="default", storage=FakeStorage())
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail["code"] == "invalid_date"
@@ -195,23 +164,19 @@ def test_create_daily_report_returns_error_on_invalid_date(monkeypatch):
 
 def test_create_daily_report_returns_error_on_generation_failure(monkeypatch):
     def fake_generate(storage, date_str=None):
-        raise RuntimeError("es unavailable")
+        raise RuntimeError("clickhouse unavailable")
 
     monkeypatch.setattr(api_app_module, "generate_daily_report", fake_generate)
-    storage = FakeStorage()
 
     with pytest.raises(HTTPException) as exc_info:
-        create_daily_report(date="2026-05-13", storage=storage)
+        create_daily_report(date="2026-05-13", tenant_id="default", storage=FakeStorage())
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail["code"] == "daily_report_generation_failed"
 
 
-# --- OpenAPI contract checks ---
-
-
 def test_ai_reports_openapi_binds_contract():
-    operation = app.openapi()["paths"]["/api/v1/ai-reports"]["get"]
+    operation = app.openapi()["paths"]["/api/v1/ai/judgements"]["get"]
 
     assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/AIJudgementListResponse"
@@ -222,7 +187,7 @@ def test_ai_reports_openapi_binds_contract():
 
 
 def test_daily_reports_list_openapi_binds_contract():
-    operation = app.openapi()["paths"]["/api/v1/daily-reports"]["get"]
+    operation = app.openapi()["paths"]["/api/v1/reports/daily"]["get"]
 
     assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/DailyReportListResponse"
@@ -233,7 +198,7 @@ def test_daily_reports_list_openapi_binds_contract():
 
 
 def test_daily_reports_create_openapi_binds_contract():
-    operation = app.openapi()["paths"]["/api/v1/daily-reports"]["post"]
+    operation = app.openapi()["paths"]["/api/v1/reports/daily"]["post"]
 
     assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/DailyReport"

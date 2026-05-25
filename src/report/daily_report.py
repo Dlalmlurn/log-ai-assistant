@@ -4,13 +4,12 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from src.config import settings
 from src.schemas import DailyReport
-from src.storage.elastic_client import ElasticStorage
+from src.storage import ClickHouseStorage
 
 
 class DailyReportBuilder:
-    def __init__(self, storage: ElasticStorage):
+    def __init__(self, storage: ClickHouseStorage):
         self.storage = storage
 
     def build(self, date_str: str | None = None) -> DailyReport:
@@ -18,25 +17,10 @@ class DailyReportBuilder:
         start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
         end = start + timedelta(days=1)
 
-        log_count = self.storage.count(
-            settings.elasticsearch_log_index,
-            query={"range": {"event_time": {"gte": start.isoformat(), "lt": end.isoformat()}}},
-        )
-        alert_count = self.storage.count(
-            settings.elasticsearch_alert_index,
-            query={"range": {"detect_time": {"gte": start.isoformat(), "lt": end.isoformat()}}},
-        )
-        high_risk_count = self.storage.count(
-            settings.elasticsearch_alert_index,
-            query={
-                "bool": {
-                    "must": [
-                        {"range": {"detect_time": {"gte": start.isoformat(), "lt": end.isoformat()}}},
-                        {"term": {"risk_level": "high"}},
-                    ]
-                }
-            },
-        )
+        stats = self.storage.get_stats_overview(start_time=start, end_time=end)
+        log_count = int(stats.get("log_count") or 0)
+        alert_count = int(stats.get("anomaly_count") or 0)
+        high_risk_count = int(stats.get("high_risk_count") or 0)
 
         major_risks, high_users, typical_alerts = self._aggregate_alert_details(start, end)
         overall_score = self._score(log_count, alert_count, high_risk_count)
@@ -77,30 +61,26 @@ class DailyReportBuilder:
         start: datetime,
         end: datetime,
     ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
-        agg_body = {
-            "size": 0,
-            "query": {"range": {"detect_time": {"gte": start.isoformat(), "lt": end.isoformat()}}},
-            "aggs": {
-                "rule_hits": {"terms": {"field": "rule_hits", "size": 5}},
-                "users": {"terms": {"field": "user_id", "size": 5}},
-            },
-        }
-        agg_resp = self.storage.aggregate(settings.elasticsearch_alert_index, agg_body)
-
-        risk_buckets = agg_resp.get("aggregations", {}).get("rule_hits", {}).get("buckets", [])
-        user_buckets = agg_resp.get("aggregations", {}).get("users", {}).get("buckets", [])
-
-        major_risks = [b.get("key", "unknown") for b in risk_buckets]
-        high_users = [b.get("key", "unknown") for b in user_buckets]
-
-        typical_alerts = self.storage.search(
-            settings.elasticsearch_alert_index,
-            query={"range": {"detect_time": {"gte": start.isoformat(), "lt": end.isoformat()}}},
-            size=5,
-            sort=[{"risk_score": "desc"}, {"detect_time": "desc"}],
+        risk_rows = self.storage.aggregate_anomalies(
+            field="attack_type",
+            start_time=start,
+            end_time=end,
+            limit=5,
         )
-        for item in typical_alerts:
-            item.pop("_id", None)
+        user_rows = self.storage.aggregate_anomalies(
+            field="user_id",
+            start_time=start,
+            end_time=end,
+            limit=5,
+        )
+        typical_alerts, _total = self.storage.list_anomalies(
+            start_time=start,
+            end_time=end,
+            limit=5,
+            offset=0,
+        )
+        major_risks = [str(row.get("key") or "unknown") for row in risk_rows]
+        high_users = [str(row.get("key") or "unknown") for row in user_rows if row.get("key")]
         return major_risks, high_users, typical_alerts
 
     @staticmethod
@@ -164,6 +144,6 @@ class DailyReportBuilder:
         return "\n".join(lines)
 
 
-def generate_daily_report(storage: ElasticStorage, date_str: str | None = None) -> DailyReport:
+def generate_daily_report(storage: ClickHouseStorage, date_str: str | None = None) -> DailyReport:
     builder = DailyReportBuilder(storage)
     return builder.build(date_str=date_str)

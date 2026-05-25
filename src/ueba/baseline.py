@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from src.config import settings
 from src.schemas import UserBaseline
-from src.storage.elastic_client import ElasticStorage
+from src.storage import ClickHouseStorage
 
 SENSITIVE_HINTS = ("download", "export", "admin", "sensitive")
 
@@ -163,20 +162,21 @@ def build_baselines_from_logs(logs: list[dict[str, Any]]) -> list[UserBaseline]:
     return results
 
 
-def build_and_store_baselines(storage: ElasticStorage, output_path: Path | None = None) -> list[UserBaseline]:
-    # For generated/historical event_time data, ingest_time is a more stable baseline window.
-    logs = storage.fetch_recent_logs_by_field(hours=24 * 7, size=10000, time_field="ingest_time")
+def build_and_store_baselines(storage: ClickHouseStorage, output_path: Path | None = None) -> list[UserBaseline]:
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(days=7)
+    logs, _total = storage.list_logs(
+        start_time=start_time,
+        end_time=end_time,
+        limit=10000,
+        offset=0,
+    )
     if not logs:
-        logs = storage.search(
-            index=settings.elasticsearch_log_index,
-            query={"match_all": {}},
-            size=10000,
-            sort=[{"ingest_time": "desc"}],
-        )
+        logs, _total = storage.list_logs(limit=10000, offset=0)
     baselines = build_baselines_from_logs(logs)
 
     docs = [item.model_dump(mode="json") for item in baselines]
-    storage.bulk_index(index=settings.elasticsearch_baseline_index, documents=docs, id_field="user_id")
+    storage.insert_user_baselines(baselines)
 
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -16,14 +16,14 @@ from src.ai_engine import AIAnalyzer
 from src.config import settings
 from src.report.daily_report import generate_daily_report
 from src.schemas import AnomalyEvent
-from src.storage import ElasticStorage
+from src.storage import ClickHouseStorage
 
 st.set_page_config(page_title="日志分析 AI 助手", layout="wide")
 
 
 @st.cache_resource
-def get_storage() -> ElasticStorage:
-    return ElasticStorage()
+def get_storage() -> ClickHouseStorage:
+    return ClickHouseStorage()
 
 
 @st.cache_resource
@@ -31,36 +31,25 @@ def get_analyzer() -> AIAnalyzer:
     return AIAnalyzer()
 
 
-def page_overview(storage: ElasticStorage) -> None:
+def page_overview(storage: ClickHouseStorage) -> None:
     st.title("系统概览")
     now = datetime.now(timezone.utc)
     start = datetime.combine(now.date(), datetime.min.time(), tzinfo=timezone.utc)
 
-    today_query = {"range": {"ingest_time": {"gte": start.isoformat(), "lte": now.isoformat()}}}
-    alert_query = {"range": {"detect_time": {"gte": start.isoformat(), "lte": now.isoformat()}}}
-
-    log_count = storage.count(settings.elasticsearch_log_index, today_query)
-    alert_count = storage.count(settings.elasticsearch_alert_index, alert_query)
-    high_alert_count = storage.count(
-        settings.elasticsearch_alert_index,
-        {"bool": {"must": [alert_query, {"term": {"risk_level": "high"}}]}},
+    stats = storage.get_stats_overview(start_time=start, end_time=now)
+    log_count = int(stats.get("log_count") or 0)
+    alert_count = int(stats.get("anomaly_count") or 0)
+    high_alert_count = int(stats.get("high_risk_count") or 0)
+    _, ai_count = storage.list_ai_judgements(limit=1, offset=0)
+    user_rows = storage.aggregate_logs(
+        time_from=start,
+        time_to=now,
+        group_by=["event_date"],
+        metrics=["unique_users", "unique_src_ips"],
+        limit=1,
     )
-    user_agg = storage.aggregate(
-        settings.elasticsearch_log_index,
-        {
-            "size": 0,
-            "query": today_query,
-            "aggs": {
-                "users": {"cardinality": {"field": "user_id"}},
-                "ips": {"cardinality": {"field": "src_ip"}},
-            },
-        },
-    )
-    ai_count = storage.count(settings.elasticsearch_ai_index)
-
-    users = user_agg.get("aggregations", {}).get("users", {}).get("value", 0)
-
-    ips = user_agg.get("aggregations", {}).get("ips", {}).get("value", 0)
+    users = int(user_rows[0].get("unique_users") or 0) if user_rows else 0
+    ips = int(user_rows[0].get("unique_src_ips") or 0) if user_rows else 0
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("今日日志总量", log_count)
@@ -71,7 +60,7 @@ def page_overview(storage: ElasticStorage) -> None:
     c6.metric("AI已研判数量", ai_count)
 
 
-def page_recent_logs(storage: ElasticStorage) -> None:
+def page_recent_logs(storage: ClickHouseStorage) -> None:
     st.title("最近日志")
     col1, col2, col3, col4 = st.columns(4)
     source_type = col1.selectbox("source_type", ["全部", "vpn", "oa", "api", "system", "security_device"])
@@ -90,53 +79,40 @@ def page_recent_logs(storage: ElasticStorage) -> None:
         st.warning("结束时间早于开始时间，已自动交换。")
         start_time, end_time = end_time, start_time
 
-    must = []
-    must.append({"range": {"ingest_time": {"gte": start_time.isoformat(), "lte": end_time.isoformat()}}})
-    if source_type != "全部":
-        must.append({"term": {"source_type": source_type}})
-    if user_id:
-        must.append({"term": {"user_id": user_id}})
-    if src_ip:
-        must.append({"term": {"src_ip": src_ip}})
-    if result != "全部":
-        must.append({"term": {"result": result}})
-
-    logs = storage.search(
-        settings.elasticsearch_log_index,
-        query={"bool": {"must": must}},
-        size=300,
-        sort=[{"ingest_time": "desc"}],
+    logs, _total = storage.list_logs(
+        source_type=None if source_type == "全部" else source_type,
+        user_id=user_id or None,
+        src_ip=src_ip or None,
+        result=None if result == "全部" else result,
+        start_time=start_time,
+        end_time=end_time,
+        limit=300,
+        offset=0,
     )
     df = pd.DataFrame(logs)
     st.dataframe(df, use_container_width=True)
 
 
-def _load_alerts(storage: ElasticStorage, risk: str, user_id: str, rule: str) -> list[dict]:
-    must = []
-    must.append({"range": {"detect_time": {"gte": (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()}}})
-    if risk != "全部":
-        must.append({"term": {"risk_level": risk}})
-    if user_id:
-        must.append({"term": {"user_id": user_id}})
-    if rule:
-        must.append({"match_phrase": {"rule_hits": rule}})
-
-    return storage.search(
-        settings.elasticsearch_alert_index,
-        query={"bool": {"must": must}},
-        size=500,
-        sort=[{"detect_time": "desc"}],
+def _load_alerts(storage: ClickHouseStorage, risk: str, user_id: str, reason_code: str) -> list[dict]:
+    items, _total = storage.list_anomalies(
+        risk_level=None if risk == "全部" else risk,
+        user_id=user_id or None,
+        reason_code=reason_code or None,
+        start_time=datetime.now(timezone.utc) - timedelta(days=7),
+        limit=500,
+        offset=0,
     )
+    return items
 
 
-def page_alerts(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
+def page_alerts(storage: ClickHouseStorage, analyzer: AIAnalyzer) -> None:
     st.title("异常事件")
     c1, c2, c3 = st.columns(3)
     risk = c1.selectbox("风险等级", ["全部", "low", "medium", "high", "critical"])
     user_id = c2.text_input("用户")
-    rule = c3.text_input("规则关键词")
+    reason_code = c3.text_input("reason_code")
 
-    alerts = _load_alerts(storage, risk, user_id, rule)
+    alerts = _load_alerts(storage, risk, user_id, reason_code)
     if not alerts:
         st.info("暂无异常事件")
         return
@@ -150,124 +126,66 @@ def page_alerts(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
     st.subheader("异常详情")
     st.json(selected)
 
-    related_logs = storage.search(
-        settings.elasticsearch_log_index,
-        query={"terms": {"event_id": selected.get("related_event_ids", [])}},
-        size=50,
-    )
+    related_logs = storage.list_logs_by_event_ids(selected.get("related_event_ids", []))
     st.subheader("相关日志摘要")
     st.dataframe(pd.DataFrame(related_logs), use_container_width=True)
 
-    baseline = storage.search(
-        settings.elasticsearch_baseline_index,
-        query={"term": {"user_id": selected.get("user_id")}},
-        size=1,
-    )
+    baseline_doc = storage.get_user_baseline(str(selected.get("user_id"))) if selected.get("user_id") else None
     st.subheader("用户行为基线")
-    st.json(baseline[0] if baseline else {})
+    st.json(baseline_doc or {})
 
-    ai_report = storage.search(
-        settings.elasticsearch_ai_index,
-        query={"term": {"event_id": selected_id}},
-        size=1,
-        sort=[{"created_at": "desc"}],
-    )
+    ai_report = storage.get_latest_ai_judgement(selected_id)
     st.subheader("AI 研判结果")
-    st.json(ai_report[0] if ai_report else {})
+    st.json(ai_report or {})
 
     if st.button("重新 AI 研判", key=f"reanalyze-{selected_id}"):
         alert = AnomalyEvent.model_validate(selected)
-        baseline_doc = baseline[0] if baseline else {}
-        report = analyzer.analyze(event=alert, baseline=baseline_doc, related_logs=related_logs)
-        report_doc = report.model_dump(mode="json")
-        storage.index_document(settings.elasticsearch_ai_index, report_doc, doc_id=report.judgement_id)
-        storage.update_document(
-            settings.elasticsearch_alert_index,
-            selected_id,
-            {"ai_status": "analyzed"},
-        )
+        report = analyzer.analyze(event=alert, baseline=baseline_doc or {}, related_logs=related_logs)
+        storage.insert_ai_judgement(report)
+        storage.update_anomaly_ai_status(selected_id, "analyzed")
         st.success("已重新生成 AI 研判")
 
 
-def page_ai_reports(storage: ElasticStorage) -> None:
+def page_ai_reports(storage: ClickHouseStorage) -> None:
     st.title("AI 研判")
-    reports = storage.search(
-        settings.elasticsearch_ai_index,
-        query={"match_all": {}},
-        size=200,
-        sort=[{"created_at": "desc"}],
-    )
+    reports, _total = storage.list_ai_judgements(limit=200, offset=0)
     st.dataframe(pd.DataFrame(reports), use_container_width=True)
 
 
-def page_user_risk(storage: ElasticStorage) -> None:
+def page_user_risk(storage: ClickHouseStorage) -> None:
     st.title("用户风险排行")
-    body = {
-        "size": 0,
-        "aggs": {
-            "users": {
-                "terms": {"field": "user_id", "size": 20},
-                "aggs": {
-                    "alert_count": {"value_count": {"field": "event_id"}},
-                    "high_count": {"filter": {"term": {"risk_level": "high"}}},
-                    "risk_score": {"sum": {"field": "risk_score"}},
-                    "last_time": {"max": {"field": "detect_time"}},
-                    "top_rule": {"terms": {"field": "rule_hits", "size": 1}},
-                },
-            }
-        },
-    }
-    resp = storage.aggregate(settings.elasticsearch_alert_index, body)
-    rows = []
-    for bucket in resp.get("aggregations", {}).get("users", {}).get("buckets", []):
-        top_rule_buckets = bucket.get("top_rule", {}).get("buckets", [])
-        rows.append(
-            {
-                "user_id": bucket.get("key"),
-                "异常数量": bucket.get("alert_count", {}).get("value", 0),
-                "高危数量": bucket.get("high_count", {}).get("doc_count", 0),
-                "风险分": bucket.get("risk_score", {}).get("value", 0),
-                "主要规则": top_rule_buckets[0].get("key") if top_rule_buckets else "",
-                "最近异常时间": bucket.get("last_time", {}).get("value_as_string", ""),
-            }
-        )
-    df = pd.DataFrame(rows).sort_values(by="风险分", ascending=False) if rows else pd.DataFrame()
+    rows = storage.aggregate_anomalies(field="user_id", limit=20)
+    df = pd.DataFrame(
+        [{"user_id": row.get("key"), "异常数量": row.get("count", 0)} for row in rows]
+    )
     st.dataframe(df, use_container_width=True)
 
 
-def page_rule_stats(storage: ElasticStorage) -> None:
+def page_rule_stats(storage: ClickHouseStorage) -> None:
     st.title("规则命中统计")
-    body = {"size": 0, "aggs": {"rules": {"terms": {"field": "rule_hits", "size": 20}}}}
-    resp = storage.aggregate(settings.elasticsearch_alert_index, body)
     rows = [
-        {"rule": b.get("key"), "count": b.get("doc_count")}
-        for b in resp.get("aggregations", {}).get("rules", {}).get("buckets", [])
+        {"attack_type": row.get("key"), "count": row.get("count")}
+        for row in storage.aggregate_anomalies(field="attack_type", limit=20)
     ]
     st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
 
-def page_daily_report(storage: ElasticStorage) -> None:
+def page_daily_report(storage: ClickHouseStorage) -> None:
     st.title("每日安全态势简报")
     if st.button("生成今日简报"):
         report = generate_daily_report(storage)
-        doc = report.model_dump(mode="json")
-        storage.index_document(settings.elasticsearch_daily_index, doc, doc_id=report.report_id)
+        storage.insert_daily_report(report)
         st.success("简报已生成")
         st.markdown(report.markdown)
 
-    reports = storage.search(
-        settings.elasticsearch_daily_index,
-        query={"match_all": {}},
-        size=20,
-        sort=[{"created_at": "desc"}],
-    )
+    reports, _total = storage.list_daily_reports(limit=20, offset=0)
     if reports:
         selected = st.selectbox("历史简报", options=[r["report_id"] for r in reports])
         report = next(r for r in reports if r["report_id"] == selected)
         st.markdown(report.get("markdown", ""))
 
 
-def page_system_health(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
+def page_system_health(storage: ClickHouseStorage, analyzer: AIAnalyzer) -> None:
     st.title("系统运行状态")
 
     kafka_ok = True
@@ -280,7 +198,7 @@ def page_system_health(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
     except Exception:
         kafka_ok = False
 
-    es_ok = storage.health()
+    clickhouse_ok = storage.health()
 
     flink_ok = False
     try:
@@ -292,17 +210,11 @@ def page_system_health(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
         flink_ok = False
 
     st.write(f"Kafka 连接: {'正常' if kafka_ok else '异常'}")
-    st.write(f"Elasticsearch 连接: {'正常' if es_ok else '异常'}")
+    st.write(f"ClickHouse 连接: {'正常' if clickhouse_ok else '异常'}")
     st.write(f"Flink Dashboard: {settings.flink_dashboard_url} ({'正常' if flink_ok else '异常'})")
     st.write(f"DashScope API: {'已配置' if not analyzer.mock_mode else '未配置，当前为mock模式'}")
 
-    latest = storage.search(
-        settings.elasticsearch_log_index,
-        query={"match_all": {}},
-        size=1,
-        sort=[{"ingest_time": "desc"}],
-    )
-    latest_time = latest[0].get("ingest_time") if latest else "N/A"
+    latest_time = storage.latest_security_log_ingest_time() or "N/A"
     st.write(f"最近一次数据更新时间: {latest_time}")
 
 

@@ -6,7 +6,7 @@ from datetime import date, datetime
 from typing import Any
 
 from src.config import settings
-from src.schemas import AIFeedback, AIJudgement
+from src.schemas import AIFeedback, AIJudgement, AnomalyEvent, DailyReport, UserBaseline
 
 
 LOG_COLUMNS: tuple[str, ...] = (
@@ -160,6 +160,9 @@ AI_FEEDBACK_COLUMNS: tuple[str, ...] = (
     "created_at",
 )
 
+AI_JUDGEMENT_JSON_FIELDS = {"feedback_suggestions", "raw_response"}
+DAILY_REPORT_JSON_FIELDS = set()
+
 ALLOWED_AGGREGATE_GROUPS = {
     "tenant_id",
     "source_type",
@@ -281,6 +284,23 @@ class ClickHouseStorage:
         )
         return _normalize_log_row(items[0]) if items else None
 
+    def list_logs_by_event_ids(self, event_ids: Sequence[str]) -> list[dict[str, Any]]:
+        if not event_ids:
+            return []
+        items = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(LOG_COLUMNS)}
+            FROM security_logs
+            WHERE event_id IN {{event_ids:Array(String)}}
+            ORDER BY event_time ASC
+            LIMIT {{limit:UInt64}}
+            """,
+            {"event_ids": list(event_ids), "limit": max(1, len(event_ids))},
+        )
+        order = {event_id: index for index, event_id in enumerate(event_ids)}
+        logs = [_normalize_log_row(item) for item in items]
+        return sorted(logs, key=lambda item: order.get(str(item.get("event_id")), len(order)))
+
     def aggregate_logs(
         self,
         *,
@@ -308,13 +328,14 @@ class ClickHouseStorage:
         select_parts = [*resolved_group_by, *(ALLOWED_AGGREGATE_METRICS[item] for item in resolved_metrics)]
         parameters["limit"] = _normalize_limit(limit)
         group_sql = ", ".join(resolved_group_by)
+        order_metric = resolved_metrics[0]
         return self._select_dicts(
             f"""
             SELECT {", ".join(select_parts)}
             FROM security_logs
             {_where(field_filters)}
             GROUP BY {group_sql}
-            ORDER BY count DESC
+            ORDER BY {order_metric} DESC
             LIMIT {{limit:UInt64}}
             """,
             parameters,
@@ -328,6 +349,7 @@ class ClickHouseStorage:
         user_id: str | None = None,
         src_ip: str | None = None,
         reason_code: str | None = None,
+        ai_status: str | None = None,
         status: str | None = None,
         start_time: datetime | None = None,
         end_time: datetime | None = None,
@@ -340,6 +362,7 @@ class ClickHouseStorage:
             user_id=user_id,
             src_ip=src_ip,
             reason_code=reason_code,
+            ai_status=ai_status,
             status=status,
             start_time=start_time,
             end_time=end_time,
@@ -375,6 +398,57 @@ class ClickHouseStorage:
             {"event_id": event_id},
         )
         return _normalize_anomaly_row(items[0]) if items else None
+
+    def insert_anomalies(self, anomalies: Sequence[AnomalyEvent | dict[str, Any]]) -> None:
+        rows = [
+            _row_from_payload(
+                _model_payload(item),
+                ANOMALY_COLUMNS,
+                json_fields=ANOMALY_JSON_FIELDS,
+                defaults={"model_version": "", "ai_status": "not_required", "status": "new"},
+            )
+            for item in anomalies
+        ]
+        if rows:
+            self.client.insert("anomaly_events", rows, column_names=list(ANOMALY_COLUMNS))
+
+    def update_anomaly_ai_status(self, event_id: str, ai_status: str) -> None:
+        self.client.command(
+            """
+            ALTER TABLE anomaly_events
+            UPDATE ai_status = {ai_status:String}
+            WHERE event_id = {event_id:String}
+            """,
+            parameters={"event_id": event_id, "ai_status": ai_status},
+        )
+
+    def aggregate_anomalies(
+        self,
+        *,
+        field: str,
+        tenant_id: str | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        _assert_allowed_values([field], {"attack_type", "user_id", "risk_level", "status"}, "anomaly aggregate field")
+        filters, parameters = _build_anomaly_filters(
+            tenant_id=tenant_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        parameters["limit"] = _normalize_limit(limit)
+        return self._select_dicts(
+            f"""
+            SELECT {field} AS key, count() AS count
+            FROM anomaly_events
+            {_where(filters)}
+            GROUP BY {field}
+            ORDER BY count DESC
+            LIMIT {{limit:UInt64}}
+            """,
+            parameters,
+        )
 
     def list_user_baselines(
         self,
@@ -446,10 +520,41 @@ class ClickHouseStorage:
         row = _row_from_payload(
             payload,
             AI_JUDGEMENT_COLUMNS,
-            json_fields={"feedback_suggestions", "raw_response"},
+            json_fields=AI_JUDGEMENT_JSON_FIELDS,
             defaults={"model_version": "", "is_mock": False},
         )
         self.client.insert("ai_judgements", [row], column_names=list(AI_JUDGEMENT_COLUMNS))
+
+    def list_ai_judgements(
+        self,
+        *,
+        event_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        filters, parameters = _build_filters(equals={"event_id": event_id})
+        where_sql = _where(filters)
+        parameters |= _pagination_parameters(limit=limit, offset=offset)
+        rows = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(AI_JUDGEMENT_COLUMNS)}
+            FROM ai_judgements
+            {where_sql}
+            ORDER BY created_at DESC
+            LIMIT {{limit:UInt64}} OFFSET {{offset:UInt64}}
+            """,
+            parameters,
+        )
+        total = self._select_scalar(
+            f"SELECT count() FROM ai_judgements {where_sql}",
+            parameters,
+            default=0,
+        )
+        return [_normalize_ai_judgement_row(row) for row in rows], int(total or 0)
+
+    def get_latest_ai_judgement(self, event_id: str) -> dict[str, Any] | None:
+        items, _total = self.list_ai_judgements(event_id=event_id, limit=1, offset=0)
+        return items[0] if items else None
 
     def insert_feedback(self, feedback: AIFeedback | dict[str, Any]) -> None:
         payload = _model_payload(feedback)
@@ -459,6 +564,18 @@ class ClickHouseStorage:
             defaults={"judgement_id": "", "user_id": "", "review_status": "pending"},
         )
         self.client.insert("ai_feedback", [row], column_names=list(AI_FEEDBACK_COLUMNS))
+
+    def insert_daily_report(self, report: DailyReport | dict[str, Any], *, tenant_id: str = "default") -> None:
+        payload = _daily_report_payload(_model_payload(report), tenant_id=tenant_id)
+        row = _row_from_payload(payload, DAILY_REPORT_COLUMNS)
+        self.client.insert("daily_security_reports", [row], column_names=list(DAILY_REPORT_COLUMNS))
+
+    def insert_user_baselines(self, baselines: Sequence[UserBaseline | dict[str, Any]]) -> None:
+        rows: list[list[Any]] = []
+        for baseline in baselines:
+            rows.extend(_baseline_rows_from_payload(_model_payload(baseline)))
+        if rows:
+            self.client.insert("ueba_user_baseline", rows, column_names=list(BASELINE_COLUMNS))
 
     def list_daily_reports(
         self,
@@ -601,6 +718,7 @@ def _build_anomaly_filters(
     user_id: str | None = None,
     src_ip: str | None = None,
     reason_code: str | None = None,
+    ai_status: str | None = None,
     status: str | None = None,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
@@ -611,6 +729,7 @@ def _build_anomaly_filters(
             "risk_level": risk_level,
             "user_id": user_id,
             "src_ip": src_ip,
+            "ai_status": ai_status,
             "status": status,
         },
         time_field="event_time",
@@ -729,6 +848,14 @@ def _normalize_anomaly_row(row: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _normalize_ai_judgement_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    for field in AI_JUDGEMENT_JSON_FIELDS:
+        normalized[field] = _json_loads(normalized.get(field), default={})
+    normalized["is_mock"] = bool(normalized.get("is_mock"))
+    return normalized
+
+
 # 把日报组织成适合接口返回的对象
 def _normalize_daily_report_row(row: dict[str, Any]) -> dict[str, Any]:
     report_date = row.get("report_date")
@@ -808,6 +935,124 @@ def _baseline_rows_to_profiles(rows: Sequence[dict[str, Any]]) -> list[dict[str,
             "value_histogram": _json_loads(row.get("value_histogram"), default={}),
         }
     return list(grouped.values())
+
+
+def _daily_report_payload(payload: dict[str, Any], *, tenant_id: str) -> dict[str, Any]:
+    report_date = _coerce_date(payload.get("date") or payload.get("report_date"))
+    high_risk_count = int(payload.get("high_risk_count") or 0)
+    typical_alerts = payload.get("typical_alerts") if isinstance(payload.get("typical_alerts"), list) else []
+    key_events = [
+        str(item.get("event_id"))
+        for item in typical_alerts
+        if isinstance(item, dict) and item.get("event_id")
+    ]
+    recommendation = payload.get("recommendation", "")
+    recommended_actions = recommendation if isinstance(recommendation, list) else _split_non_empty_lines(str(recommendation))
+    return {
+        "report_date": report_date,
+        "tenant_id": tenant_id,
+        "total_logs": int(payload.get("log_count") or payload.get("total_logs") or 0),
+        "anomaly_count": int(payload.get("alert_count") or payload.get("anomaly_count") or 0),
+        "high_count": high_risk_count,
+        "critical_count": int(payload.get("critical_count") or 0),
+        "overall_score": float(payload.get("overall_score") or 0),
+        "top_risk_users": _string_list(payload.get("high_risk_users") or payload.get("top_risk_users")),
+        "top_attack_types": _string_list(payload.get("major_risks") or payload.get("top_attack_types")),
+        "key_events": key_events or _string_list(payload.get("key_events")),
+        "ai_summary": str(payload.get("ai_summary") or ""),
+        "recommended_actions": recommended_actions,
+        "markdown_body": str(payload.get("markdown") or payload.get("markdown_body") or ""),
+        "created_at": payload.get("created_at"),
+    }
+
+
+def _baseline_rows_from_payload(payload: dict[str, Any]) -> list[list[Any]]:
+    rows: list[list[Any]] = []
+    profile_names = {
+        "who_profile": "who",
+        "time_profile": "time",
+        "location_profile": "location",
+        "access_profile": "access",
+        "volume_profile": "volume",
+        "result_profile": "result",
+        "why_profile": "why",
+    }
+    base = {
+        "baseline_date": payload.get("baseline_date"),
+        "tenant_id": payload.get("tenant_id") or "default",
+        "user_id": payload.get("user_id") or "",
+        "sample_days": payload.get("sample_days") or 0,
+        "sample_count": payload.get("sample_count") or 0,
+        "baseline_confidence": payload.get("baseline_confidence") or 0,
+        "trained_from": payload.get("trained_from"),
+        "trained_to": payload.get("trained_to"),
+        "fallback_level": payload.get("fallback_level") or "none",
+        "model_version": payload.get("model_version") or "",
+        "created_at": payload.get("created_at"),
+    }
+    for profile_name, profile_group in profile_names.items():
+        profile = payload.get(profile_name)
+        if not isinstance(profile, dict):
+            continue
+        for feature_name, value in profile.items():
+            feature_payload = {
+                **base,
+                "profile_group": profile_group,
+                "feature_name": str(feature_name),
+                **_baseline_feature_value(value),
+            }
+            rows.append(
+                _row_from_payload(
+                    feature_payload,
+                    BASELINE_COLUMNS,
+                    json_fields={"value_histogram"},
+                    defaults={
+                        "mean_value": None,
+                        "std_value": None,
+                        "p50_value": None,
+                        "p95_value": None,
+                        "p99_value": None,
+                        "common_values": [],
+                        "value_histogram": {},
+                    },
+                )
+            )
+    return rows
+
+
+def _baseline_feature_value(value: Any) -> dict[str, Any]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return {"mean_value": float(value), "common_values": [], "value_histogram": {}}
+    if isinstance(value, list):
+        return {"common_values": _string_list(value), "value_histogram": {}}
+    if isinstance(value, dict):
+        numeric_fields = {
+            field: value.get(field)
+            for field in ("mean_value", "std_value", "p50_value", "p95_value", "p99_value")
+            if isinstance(value.get(field), (int, float))
+        }
+        common_values = value.get("common_values")
+        histogram = value.get("value_histogram")
+        if numeric_fields or common_values is not None or histogram is not None:
+            return {
+                **numeric_fields,
+                "common_values": _string_list(common_values),
+                "value_histogram": histogram if isinstance(histogram, dict) else {},
+            }
+        return {"common_values": [], "value_histogram": value}
+    return {"common_values": [str(value)] if value not in (None, "") else [], "value_histogram": {}}
+
+
+def _coerce_date(value: Any) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
+
+
+def _split_non_empty_lines(value: str) -> list[str]:
+    return [line.strip() for line in value.splitlines() if line.strip()]
 
 
 # 把 json 字符串转化成字典或者列表

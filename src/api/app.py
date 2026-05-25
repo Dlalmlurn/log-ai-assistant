@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -25,6 +25,8 @@ from src.schemas import (
     DailyReportListResponse,
     ErrorResponse,
     EvidenceChain,
+    LogAggregateRequest,
+    LogAggregateResponse,
     NormalizedLog,
     NormalizedLogListResponse,
     RiskLevel,
@@ -32,7 +34,7 @@ from src.schemas import (
     UserBaseline,
     UserBaselineListResponse,
 )
-from src.storage import ElasticStorage
+from src.storage import ClickHouseStorage
 from src.ueba import build_and_store_baselines
 
 
@@ -83,9 +85,8 @@ app.add_middleware(
 def health_check() -> HealthResponse:
     return get_health_status()
 
-# 给API接口创建并准备ElasticStorage访问对象的函数
-def get_storage() -> ElasticStorage:
-    return ElasticStorage()
+def get_storage() -> ClickHouseStorage:
+    return ClickHouseStorage()
 
 
 def get_analyzer() -> AIAnalyzer:
@@ -101,45 +102,45 @@ def get_analyzer() -> AIAnalyzer:
     description="REQ-002, REQ-006: query normalized logs for the React realtime log view.",
 )
 def list_logs(
+    tenant_id: str | None = Query(default=None),
     source_type: SourceType | None = Query(default=None),
+    log_type: str | None = Query(default=None),
     user_id: str | None = Query(default=None),
     src_ip: str | None = Query(default=None),
+    action: str | None = Query(default=None),
     result: str | None = Query(default=None),
     start_time: datetime | None = Query(default=None),
     end_time: datetime | None = Query(default=None),
     limit: int = Query(default=50, ge=1),
     offset: int = Query(default=0, ge=0),
-    storage: ElasticStorage = Depends(get_storage),
+    storage: ClickHouseStorage = Depends(get_storage),
 ) -> NormalizedLogListResponse:
-# 构建 ES 查询
-    query = _build_logs_query(
-        source_type=source_type,
-        user_id=user_id,
-        src_ip=src_ip,
-        result=result,
-        start_time=start_time,
-        end_time=end_time,
-    )
     try:
-        items, total = storage.search_page(
-            index=settings.elasticsearch_log_index,
-            query=query,
+        items, total = storage.list_logs(
+            tenant_id=tenant_id,
+            source_type=source_type,
+            log_type=log_type,
+            user_id=user_id,
+            src_ip=src_ip,
+            action=action,
+            result=result,
+            start_time=start_time,
+            end_time=end_time,
             limit=limit,
             offset=offset,
-            sort=[{"event_time": "desc"}],
         )
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
-                "code": "elasticsearch_query_failed",
-                "message": "Failed to query structured logs from Elasticsearch",
-                "details": {"index": settings.elasticsearch_log_index},
+                "code": "clickhouse_query_failed",
+                "message": "Failed to query structured logs from ClickHouse",
+                "details": {"table": "security_logs"},
             },
         ) from exc
-# limit：返回日志上限。offset：从第n条日志开始查
+
     return NormalizedLogListResponse(
-        items=_strip_elasticsearch_metadata(items),
+        items=items,
         total=total,
         limit=limit,
         offset=offset,
@@ -156,85 +157,124 @@ def list_logs(
 )
 def get_log_detail(
     event_id: str,
-    storage: ElasticStorage = Depends(get_storage),
+    storage: ClickHouseStorage = Depends(get_storage),
 ) -> NormalizedLog:
     try:
-        items, _total = storage.search_page(
-            index=settings.elasticsearch_log_index,
-            query={"term": {"event_id": event_id}},
-            limit=1,
-            offset=0,
-        )
+        item = storage.get_log(event_id)
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
-                "code": "elasticsearch_query_failed",
-                "message": "Failed to query structured log detail from Elasticsearch",
-                "details": {"index": settings.elasticsearch_log_index, "event_id": event_id},
+                "code": "clickhouse_query_failed",
+                "message": "Failed to query structured log detail from ClickHouse",
+                "details": {"table": "security_logs", "event_id": event_id},
             },
         ) from exc
 
-    if not items:
+    if not item:
         raise HTTPException(
             status_code=404,
             detail={
                 "code": "log_not_found",
                 "message": "Structured log not found",
-                "details": {"index": settings.elasticsearch_log_index, "event_id": event_id},
+                "details": {"table": "security_logs", "event_id": event_id},
             },
         )
 
-    return NormalizedLog(**_strip_elasticsearch_metadata(items)[0])
+    return NormalizedLog(**item)
+
+
+@app.post(
+    "/api/v1/logs/aggregate",
+    response_model=LogAggregateResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["logs"],
+    summary="Aggregate structured security logs",
+    description="REQ-002, REQ-006: aggregate normalized logs for trend and distribution views.",
+)
+def aggregate_logs(
+    request: LogAggregateRequest,
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> LogAggregateResponse:
+    try:
+        rows = storage.aggregate_logs(
+            time_from=request.time_range.from_ if request.time_range else None,
+            time_to=request.time_range.to if request.time_range else None,
+            filters=request.filters,
+            group_by=request.group_by,
+            metrics=request.metrics,
+            limit=request.limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_log_aggregate_request",
+                "message": str(exc),
+                "details": {},
+            },
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "clickhouse_query_failed",
+                "message": "Failed to aggregate structured logs from ClickHouse",
+                "details": {"table": "security_logs"},
+            },
+        ) from exc
+
+    return LogAggregateResponse(items=rows)
 
 
 @app.get(
-    "/api/v1/alerts",
+    "/api/v1/anomalies",
     response_model=AnomalyEventListResponse,
     responses=STANDARD_ERROR_RESPONSES,
-    tags=["alerts"],
-    summary="Query security alerts",
-    description="REQ-004, REQ-006, REQ-008: query alert events for the React abnormal event view.",
+    tags=["anomalies"],
+    summary="Query anomaly events",
+    description="REQ-004, REQ-006, REQ-008: query anomaly events for the React abnormal event view.",
 )
 def list_alerts(
+    tenant_id: str | None = Query(default=None),
     risk_level: RiskLevel | None = Query(default=None),
     user_id: str | None = Query(default=None),
-    rule: str | None = Query(default=None),
+    src_ip: str | None = Query(default=None),
+    reason_code: str | None = Query(default=None),
+    ai_status: str | None = Query(default=None),
     status: str | None = Query(default=None),
     start_time: datetime | None = Query(default=None),
     end_time: datetime | None = Query(default=None),
     limit: int = Query(default=50, ge=1),
     offset: int = Query(default=0, ge=0),
-    storage: ElasticStorage = Depends(get_storage),
+    storage: ClickHouseStorage = Depends(get_storage),
 ) -> AnomalyEventListResponse:
-    query = _build_alerts_query(
-        risk_level=risk_level,
-        user_id=user_id,
-        rule=rule,
-        status=status,
-        start_time=start_time,
-        end_time=end_time,
-    )
     try:
-        items, total = storage.search_page(
-            index=settings.elasticsearch_alert_index,
-            query=query,
+        items, total = storage.list_anomalies(
+            tenant_id=tenant_id,
+            risk_level=risk_level,
+            user_id=user_id,
+            src_ip=src_ip,
+            reason_code=reason_code,
+            ai_status=ai_status,
+            status=status,
+            start_time=start_time,
+            end_time=end_time,
             limit=limit,
             offset=offset,
-            sort=[{"detect_time": "desc"}],
         )
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
-                "code": "elasticsearch_query_failed",
-                "message": "Failed to query security alerts from Elasticsearch",
-                "details": {"index": settings.elasticsearch_alert_index},
+                "code": "clickhouse_query_failed",
+                "message": "Failed to query anomaly events from ClickHouse",
+                "details": {"table": "anomaly_events"},
             },
         ) from exc
 
     return AnomalyEventListResponse(
-        items=_strip_elasticsearch_metadata(items),
+        items=items,
         total=total,
         limit=limit,
         offset=offset,
@@ -242,45 +282,39 @@ def list_alerts(
 
 
 @app.get(
-    "/api/v1/alerts/{event_id}",
+    "/api/v1/anomalies/{event_id}",
     response_model=AnomalyDetailResponse,
     responses=STANDARD_ERROR_RESPONSES,
-    tags=["alerts"],
-    summary="Get alert detail with evidence chain",
-    description="REQ-004, REQ-006: fetch alert, user baseline, related logs, AI report, and evidence chain.",
+    tags=["anomalies"],
+    summary="Get anomaly detail with evidence chain",
+    description="REQ-004, REQ-006: fetch anomaly, user baseline, related logs, AI judgement, and evidence chain.",
 )
 def get_alert_detail(
     event_id: str,
-    storage: ElasticStorage = Depends(get_storage),
+    storage: ClickHouseStorage = Depends(get_storage),
 ) -> AnomalyDetailResponse:
     try:
-        alert_items, _total = storage.search_page(
-            index=settings.elasticsearch_alert_index,
-            query={"term": {"event_id": event_id}},
-            limit=1,
-            offset=0,
-        )
+        alert = storage.get_anomaly(event_id)
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
-                "code": "elasticsearch_query_failed",
-                "message": "Failed to query alert detail from Elasticsearch",
-                "details": {"index": settings.elasticsearch_alert_index, "event_id": event_id},
+                "code": "clickhouse_query_failed",
+                "message": "Failed to query anomaly detail from ClickHouse",
+                "details": {"table": "anomaly_events", "event_id": event_id},
             },
         ) from exc
 
-    if not alert_items:
+    if not alert:
         raise HTTPException(
             status_code=404,
             detail={
-                "code": "alert_not_found",
-                "message": "Alert not found",
-                "details": {"index": settings.elasticsearch_alert_index, "event_id": event_id},
+                "code": "anomaly_not_found",
+                "message": "Anomaly event not found",
+                "details": {"table": "anomaly_events", "event_id": event_id},
             },
         )
 
-    alert = _strip_elasticsearch_metadata(alert_items)[0]
     try:
         baseline = _fetch_alert_baseline(storage, alert)
         related_logs = _fetch_related_logs(storage, alert)
@@ -289,8 +323,8 @@ def get_alert_detail(
         raise HTTPException(
             status_code=500,
             detail={
-                "code": "elasticsearch_query_failed",
-                "message": "Failed to assemble alert evidence from Elasticsearch",
+                "code": "clickhouse_query_failed",
+                "message": "Failed to assemble anomaly evidence from ClickHouse",
                 "details": {"event_id": event_id},
             },
         ) from exc
@@ -305,46 +339,40 @@ def get_alert_detail(
 
 
 @app.post(
-    "/api/v1/alerts/{event_id}/analyze",
+    "/api/v1/ai/judge/{event_id}",
     response_model=AIJudgement,
     responses=STANDARD_ERROR_RESPONSES,
-    tags=["alerts"],
-    summary="Analyze an alert with AI",
-    description="REQ-004: analyze an existing alert with alert, baseline, related_logs, and window_stats context, then store the AI report.",
+    tags=["ai"],
+    summary="Judge an anomaly with AI",
+    description="REQ-004: analyze an existing anomaly with anomaly, baseline, related_logs, and window_stats context, then store the AI judgement.",
 )
 def analyze_alert(
     event_id: str,
-    storage: ElasticStorage = Depends(get_storage),
+    storage: ClickHouseStorage = Depends(get_storage),
     analyzer: AIAnalyzer = Depends(get_analyzer),
 ) -> AIJudgement:
     try:
-        alert_items, _total = storage.search_page(
-            index=settings.elasticsearch_alert_index,
-            query={"term": {"event_id": event_id}},
-            limit=1,
-            offset=0,
-        )
+        alert = storage.get_anomaly(event_id)
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
-                "code": "elasticsearch_query_failed",
-                "message": "Failed to query alert for AI analysis",
-                "details": {"index": settings.elasticsearch_alert_index, "event_id": event_id},
+                "code": "clickhouse_query_failed",
+                "message": "Failed to query anomaly for AI judgement",
+                "details": {"table": "anomaly_events", "event_id": event_id},
             },
         ) from exc
 
-    if not alert_items:
+    if not alert:
         raise HTTPException(
             status_code=404,
             detail={
-                "code": "alert_not_found",
-                "message": "Alert not found",
-                "details": {"index": settings.elasticsearch_alert_index, "event_id": event_id},
+                "code": "anomaly_not_found",
+                "message": "Anomaly event not found",
+                "details": {"table": "anomaly_events", "event_id": event_id},
             },
         )
 
-    alert = _strip_elasticsearch_metadata(alert_items)[0]
     try:
         baseline = _fetch_alert_baseline(storage, alert)
         related_logs = _fetch_related_logs(storage, alert)
@@ -354,24 +382,15 @@ def analyze_alert(
             related_logs=related_logs,
             window_stats={},
         )
-        report_doc = report.model_dump(mode="json")
-        storage.index_document(settings.elasticsearch_ai_index, report_doc, doc_id=report.judgement_id)
-        storage.update_document(
-            settings.elasticsearch_alert_index,
-            event_id,
-            {"ai_status": "analyzed"},
-        )
+        storage.insert_ai_judgement(report)
+        storage.update_anomaly_ai_status(event_id, "analyzed")
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
-                "code": "alert_analysis_failed",
-                "message": "Failed to analyze alert and store AI report",
-                "details": {
-                    "event_id": event_id,
-                    "ai_index": settings.elasticsearch_ai_index,
-                    "alert_index": settings.elasticsearch_alert_index,
-                },
+                "code": "ai_judgement_failed",
+                "message": "Failed to judge anomaly and store AI judgement",
+                "details": {"event_id": event_id},
             },
         ) from exc
 
@@ -379,7 +398,7 @@ def analyze_alert(
 
 
 @app.get(
-    "/api/v1/baselines",
+    "/api/v1/baselines/users",
     response_model=UserBaselineListResponse,
     responses=STANDARD_ERROR_RESPONSES,
     tags=["baselines"],
@@ -387,30 +406,29 @@ def analyze_alert(
     description="REQ-003, REQ-006: query user behavior baselines for the React baseline view.",
 )
 def list_baselines(
+    tenant_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1),
     offset: int = Query(default=0, ge=0),
-    storage: ElasticStorage = Depends(get_storage),
+    storage: ClickHouseStorage = Depends(get_storage),
 ) -> UserBaselineListResponse:
     try:
-        items, total = storage.search_page(
-            index=settings.elasticsearch_baseline_index,
-            query={"match_all": {}},
+        items, total = storage.list_user_baselines(
+            tenant_id=tenant_id,
             limit=limit,
             offset=offset,
-            sort=[{"created_at": "desc"}],
         )
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
-                "code": "elasticsearch_query_failed",
-                "message": "Failed to query user baselines from Elasticsearch",
-                "details": {"index": settings.elasticsearch_baseline_index},
+                "code": "clickhouse_query_failed",
+                "message": "Failed to query user baselines from ClickHouse",
+                "details": {"table": "ueba_user_baseline"},
             },
         ) from exc
 
     return UserBaselineListResponse(
-        items=_strip_elasticsearch_metadata(items),
+        items=items,
         total=total,
         limit=limit,
         offset=offset,
@@ -426,10 +444,9 @@ def list_baselines(
     description="REQ-003: rebuild user behavior baselines from stored security logs.",
 )
 def rebuild_baselines(
-    storage: ElasticStorage = Depends(get_storage),
+    storage: ClickHouseStorage = Depends(get_storage),
 ) -> BaselineRebuildResponse:
     try:
-        storage.ensure_indices()
         baselines = build_and_store_baselines(storage)
     except Exception as exc:
         raise HTTPException(
@@ -437,10 +454,7 @@ def rebuild_baselines(
             detail={
                 "code": "baseline_rebuild_failed",
                 "message": "Failed to rebuild user baselines",
-                "details": {
-                    "source_index": settings.elasticsearch_log_index,
-                    "target_index": settings.elasticsearch_baseline_index,
-                },
+                "details": {"source_table": "security_logs", "target_table": "ueba_user_baseline"},
             },
         ) from exc
 
@@ -448,7 +462,7 @@ def rebuild_baselines(
 
 
 @app.get(
-    "/api/v1/baselines/{user_id}",
+    "/api/v1/baselines/users/{user_id}",
     response_model=UserBaseline,
     responses=STANDARD_ERROR_RESPONSES,
     tags=["baselines"],
@@ -457,71 +471,66 @@ def rebuild_baselines(
 )
 def get_baseline_detail(
     user_id: str,
-    storage: ElasticStorage = Depends(get_storage),
+    tenant_id: str | None = Query(default=None),
+    storage: ClickHouseStorage = Depends(get_storage),
 ) -> UserBaseline:
     try:
-        items, _total = storage.search_page(
-            index=settings.elasticsearch_baseline_index,
-            query={"term": {"user_id": user_id}},
-            limit=1,
-            offset=0,
-        )
+        item = storage.get_user_baseline(user_id, tenant_id=tenant_id)
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
-                "code": "elasticsearch_query_failed",
-                "message": "Failed to query user baseline from Elasticsearch",
-                "details": {"index": settings.elasticsearch_baseline_index, "user_id": user_id},
+                "code": "clickhouse_query_failed",
+                "message": "Failed to query user baseline from ClickHouse",
+                "details": {"table": "ueba_user_baseline", "user_id": user_id},
             },
         ) from exc
 
-    if not items:
+    if not item:
         raise HTTPException(
             status_code=404,
             detail={
                 "code": "baseline_not_found",
                 "message": "User baseline not found",
-                "details": {"index": settings.elasticsearch_baseline_index, "user_id": user_id},
+                "details": {"table": "ueba_user_baseline", "user_id": user_id},
             },
         )
 
-    return UserBaseline(**_strip_elasticsearch_metadata(items)[0])
+    return UserBaseline(**item)
 
 
 @app.get(
-    "/api/v1/ai-reports",
+    "/api/v1/ai/judgements",
     response_model=AIJudgementListResponse,
     responses=STANDARD_ERROR_RESPONSES,
-    tags=["ai-reports"],
-    summary="Query AI analysis reports",
-    description="REQ-004, REQ-006: query AI analysis reports for the React AI analysis view.",
+    tags=["ai"],
+    summary="Query AI judgements",
+    description="REQ-004, REQ-006: query AI judgements for the React AI analysis view.",
 )
 def list_ai_reports(
+    event_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1),
     offset: int = Query(default=0, ge=0),
-    storage: ElasticStorage = Depends(get_storage),
+    storage: ClickHouseStorage = Depends(get_storage),
 ) -> AIJudgementListResponse:
     try:
-        items, total = storage.search_page(
-            index=settings.elasticsearch_ai_index,
-            query={"match_all": {}},
+        items, total = storage.list_ai_judgements(
+            event_id=event_id,
             limit=limit,
             offset=offset,
-            sort=[{"created_at": "desc"}],
         )
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
-                "code": "elasticsearch_query_failed",
-                "message": "Failed to query AI reports from Elasticsearch",
-                "details": {"index": settings.elasticsearch_ai_index},
+                "code": "clickhouse_query_failed",
+                "message": "Failed to query AI judgements from ClickHouse",
+                "details": {"table": "ai_judgements"},
             },
         ) from exc
 
     return AIJudgementListResponse(
-        items=_strip_elasticsearch_metadata(items),
+        items=items,
         total=total,
         limit=limit,
         offset=offset,
@@ -529,7 +538,7 @@ def list_ai_reports(
 
 
 @app.get(
-    "/api/v1/daily-reports",
+    "/api/v1/reports/daily",
     response_model=DailyReportListResponse,
     responses=STANDARD_ERROR_RESPONSES,
     tags=["daily-reports"],
@@ -537,30 +546,29 @@ def list_ai_reports(
     description="REQ-005, REQ-006: query daily security posture reports.",
 )
 def list_daily_reports(
+    tenant_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1),
     offset: int = Query(default=0, ge=0),
-    storage: ElasticStorage = Depends(get_storage),
+    storage: ClickHouseStorage = Depends(get_storage),
 ) -> DailyReportListResponse:
     try:
-        items, total = storage.search_page(
-            index=settings.elasticsearch_daily_index,
-            query={"match_all": {}},
+        items, total = storage.list_daily_reports(
+            tenant_id=tenant_id,
             limit=limit,
             offset=offset,
-            sort=[{"date": "desc"}],
         )
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={
-                "code": "elasticsearch_query_failed",
-                "message": "Failed to query daily reports from Elasticsearch",
-                "details": {"index": settings.elasticsearch_daily_index},
+                "code": "clickhouse_query_failed",
+                "message": "Failed to query daily reports from ClickHouse",
+                "details": {"table": "daily_security_reports"},
             },
         ) from exc
 
     return DailyReportListResponse(
-        items=_strip_elasticsearch_metadata(items),
+        items=items,
         total=total,
         limit=limit,
         offset=offset,
@@ -568,7 +576,7 @@ def list_daily_reports(
 
 
 @app.post(
-    "/api/v1/daily-reports",
+    "/api/v1/reports/daily",
     response_model=DailyReport,
     responses=STANDARD_ERROR_RESPONSES,
     tags=["daily-reports"],
@@ -577,15 +585,12 @@ def list_daily_reports(
 )
 def create_daily_report(
     date: str | None = Query(default=None, description="Date in YYYY-MM-DD format. Defaults to today (UTC)."),
-    storage: ElasticStorage = Depends(get_storage),
+    tenant_id: str = Query(default="default"),
+    storage: ClickHouseStorage = Depends(get_storage),
 ) -> DailyReport:
     try:
-        storage.ensure_indices()
         report = generate_daily_report(storage, date_str=date)
-        report_doc = report.model_dump(mode="json")
-        storage.index_document(
-            settings.elasticsearch_daily_index, report_doc, doc_id=report.report_id
-        )
+        storage.insert_daily_report(report, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
@@ -601,11 +606,7 @@ def create_daily_report(
             detail={
                 "code": "daily_report_generation_failed",
                 "message": "Failed to generate daily report",
-                "details": {
-                    "date": date,
-                    "source_index": settings.elasticsearch_log_index,
-                    "target_index": settings.elasticsearch_daily_index,
-                },
+                "details": {"date": date, "source_table": "security_logs", "target_table": "daily_security_reports"},
             },
         ) from exc
 
@@ -664,135 +665,29 @@ def _build_error_response(
     )
 
 
-def _build_logs_query(
-    *,
-    source_type: SourceType | None = None,
-    user_id: str | None = None,
-    src_ip: str | None = None,
-    result: str | None = None,
-    start_time: datetime | None = None,
-    end_time: datetime | None = None,
-) -> dict[str, Any]:
-    # 默认查询最近 24 小时的内容而不是全量扫描
-    resolved_end_time = end_time or datetime.now(timezone.utc)
-    resolved_start_time = start_time or resolved_end_time - timedelta(hours=24)
-    # ES 的 bool.filter，必须满足所有条件，单纯筛选而非进行相关度评分
-    filters: list[dict[str, Any]] = [
-        {
-            "range": {
-                "event_time": {
-                    "gte": resolved_start_time.isoformat(),
-                    "lte": resolved_end_time.isoformat(),
-                }
-            }
-        }
-    ]
-    # 添加可选筛选条件，比如输入 user_id="Alice"，会追加一个精确匹配过滤条件。
-    for field, value in (
-        ("source_type", source_type),
-        ("user_id", user_id),
-        ("src_ip", src_ip),
-        ("result", result),
-    ):
-        if value is not None:
-            filters.append({"term": {field: value}})
-
-    return {"bool": {"filter": filters}}
-
-
-def _build_alerts_query(
-    *,
-    risk_level: RiskLevel | None = None,
-    user_id: str | None = None,
-    rule: str | None = None,
-    status: str | None = None,
-    start_time: datetime | None = None,
-    end_time: datetime | None = None,
-) -> dict[str, Any]:
-    filters: list[dict[str, Any]] = []
-    if start_time or end_time:
-        range_filter: dict[str, str] = {}
-        if start_time:
-            range_filter["gte"] = start_time.isoformat()
-        if end_time:
-            range_filter["lte"] = end_time.isoformat()
-        filters.append({"range": {"detect_time": range_filter}})
-
-    for field, value in (
-        ("risk_level", risk_level),
-        ("user_id", user_id),
-        ("status", status),
-    ):
-        if value is not None:
-            filters.append({"term": {field: value}})
-
-    if rule and rule.strip():
-        escaped_rule = _escape_elasticsearch_wildcard_value(rule.strip())
-        filters.append(
-            {
-                "wildcard": {
-                    "rule_hits": {"value": f"*{escaped_rule}*"}
-                }
-            }
-        )
-
-    if not filters:
-        return {"match_all": {}}
-    return {"bool": {"filter": filters}}
-
-
-def _escape_elasticsearch_wildcard_value(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("*", "\\*").replace("?", "\\?")
-
-
-def _strip_elasticsearch_metadata(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{key: value for key, value in item.items() if key != "_id"} for item in items]
-
-
-def _fetch_alert_baseline(storage: ElasticStorage, alert: dict[str, Any]) -> dict[str, Any]:
+def _fetch_alert_baseline(storage: ClickHouseStorage, alert: dict[str, Any]) -> dict[str, Any]:
     user_id = alert.get("user_id")
     if not user_id:
         return {}
 
-    items, _total = storage.search_page(
-        index=settings.elasticsearch_baseline_index,
-        query={"term": {"user_id": user_id}},
-        limit=1,
-        offset=0,
-    )
-    return _strip_elasticsearch_metadata(items)[0] if items else {}
+    item = storage.get_user_baseline(str(user_id), tenant_id=str(alert.get("tenant_id") or "default"))
+    return item or {}
 
 
-def _fetch_related_logs(storage: ElasticStorage, alert: dict[str, Any]) -> list[dict[str, Any]]:
+def _fetch_related_logs(storage: ClickHouseStorage, alert: dict[str, Any]) -> list[dict[str, Any]]:
     related_event_ids = _string_list(alert.get("related_event_ids"))
     if not related_event_ids:
         return []
 
-    items, _total = storage.search_page(
-        index=settings.elasticsearch_log_index,
-        query={"terms": {"event_id": related_event_ids}},
-        limit=len(related_event_ids),
-        offset=0,
-        sort=[{"event_time": "asc"}],
-    )
-    logs = _strip_elasticsearch_metadata(items)
-    order = {event_id: index for index, event_id in enumerate(related_event_ids)}
-    return sorted(logs, key=lambda item: order.get(str(item.get("event_id")), len(order)))
+    return storage.list_logs_by_event_ids(related_event_ids)
 
 
-def _fetch_ai_report(storage: ElasticStorage, alert: dict[str, Any]) -> dict[str, Any]:
+def _fetch_ai_report(storage: ClickHouseStorage, alert: dict[str, Any]) -> dict[str, Any]:
     event_id = alert.get("event_id")
     if not event_id:
         return {}
 
-    items, _total = storage.search_page(
-        index=settings.elasticsearch_ai_index,
-        query={"term": {"event_id": event_id}},
-        limit=1,
-        offset=0,
-        sort=[{"created_at": "desc"}],
-    )
-    return _strip_elasticsearch_metadata(items)[0] if items else {}
+    return storage.get_latest_ai_judgement(str(event_id)) or {}
 
 
 def _build_evidence_chain(alert: dict[str, Any], baseline: dict[str, Any], related_logs: list[dict[str, Any]]) -> EvidenceChain:
