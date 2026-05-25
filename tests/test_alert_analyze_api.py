@@ -5,12 +5,10 @@ import pytest
 from fastapi import HTTPException
 
 from src.api.app import analyze_alert, app
-from src.config import settings
 from src.schemas import AIJudgement, AnomalyEvent
 
 
 ALERT_DOC = {
-    "_id": "alert-doc-1",
     "event_id": "anom-1",
     "event_time": "2026-05-13T10:00:00Z",
     "detect_time": "2026-05-13T10:00:10Z",
@@ -24,11 +22,7 @@ ALERT_DOC = {
     "rule_hits": ["新IP登录后短时间访问敏感资源"],
     "baseline_deviations": [],
     "reason_codes": ["new_source_then_sensitive_access"],
-    "evidence": {
-        "user_id": "alice",
-        "src_ip": "203.0.113.9",
-        "resource": "/api/export",
-    },
+    "evidence": {"user_id": "alice", "src_ip": "203.0.113.9", "resource": "/api/export"},
     "related_event_ids": ["evt-login", "evt-export"],
     "ai_status": "pending",
     "status": "new",
@@ -36,7 +30,6 @@ ALERT_DOC = {
 }
 
 BASELINE_DOC = {
-    "_id": "baseline-doc-1",
     "baseline_date": "2026-05-13",
     "tenant_id": "default",
     "user_id": "alice",
@@ -49,14 +42,9 @@ BASELINE_DOC = {
     "who_profile": {"user_id": "alice"},
     "time_profile": {"active_hours": ["09:00-18:00"]},
     "location_profile": {"common_ips": ["10.0.0.7"]},
-    "access_profile": {
-        "common_user_agents": ["Chrome"],
-        "common_resources": ["/home"],
-        "avg_api_calls_per_minute": 2.0,
-        "sensitive_access_rate": 0.0,
-    },
+    "access_profile": {"common_resources": ["/home"]},
     "volume_profile": {},
-    "result_profile": {"failed_login_count_7d": 0},
+    "result_profile": {},
     "why_profile": {},
     "fallback_level": "none",
     "created_at": "2026-05-13T09:00:00Z",
@@ -64,25 +52,6 @@ BASELINE_DOC = {
 
 RELATED_LOGS = [
     {
-        "_id": "log-doc-2",
-        "event_id": "evt-export",
-        "event_time": "2026-05-13T10:02:00Z",
-        "ingest_time": "2026-05-13T10:02:05Z",
-        "tenant_id": "default",
-        "source_type": "vpn",
-        "log_type": "api_call",
-        "user_id": "alice",
-        "src_ip": "203.0.113.9",
-        "action": "api_call",
-        "resource": "/api/export",
-        "result": "success",
-        "message": "Export API called",
-        "raw_log": "raw export line",
-        "risk_tags": ["sensitive_resource"],
-        "attrs": {},
-    },
-    {
-        "_id": "log-doc-1",
         "event_id": "evt-login",
         "event_time": "2026-05-13T10:00:00Z",
         "ingest_time": "2026-05-13T10:00:05Z",
@@ -99,30 +68,50 @@ RELATED_LOGS = [
         "risk_tags": [],
         "attrs": {},
     },
+    {
+        "event_id": "evt-export",
+        "event_time": "2026-05-13T10:02:00Z",
+        "ingest_time": "2026-05-13T10:02:05Z",
+        "tenant_id": "default",
+        "source_type": "vpn",
+        "log_type": "api_call",
+        "user_id": "alice",
+        "src_ip": "203.0.113.9",
+        "action": "api_call",
+        "resource": "/api/export",
+        "result": "success",
+        "message": "Export API called",
+        "raw_log": "raw export line",
+        "risk_tags": ["sensitive_resource"],
+        "attrs": {},
+    },
 ]
 
 
 class FakeAnalyzeStorage:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
-        self.indexed: list[dict[str, object]] = []
+        self.inserted: list[AIJudgement] = []
         self.updated: list[dict[str, object]] = []
-        self.responses: dict[str, list[dict[str, object]]] = {
-            settings.elasticsearch_alert_index: [ALERT_DOC],
-            settings.elasticsearch_baseline_index: [BASELINE_DOC],
-            settings.elasticsearch_log_index: RELATED_LOGS,
-        }
+        self.anomaly: dict[str, object] | None = dict(ALERT_DOC)
 
-    def search_page(self, **kwargs):
-        self.calls.append(kwargs)
-        items = self.responses.get(str(kwargs["index"]), [])
-        return items, len(items)
+    def get_anomaly(self, event_id: str):
+        self.calls.append({"method": "get_anomaly", "event_id": event_id})
+        return self.anomaly
 
-    def index_document(self, index: str, document: dict[str, Any], doc_id: str | None = None) -> None:
-        self.indexed.append({"index": index, "document": document, "doc_id": doc_id})
+    def get_user_baseline(self, user_id: str, *, tenant_id: str | None = None, baseline_date=None):
+        self.calls.append({"method": "get_user_baseline", "user_id": user_id, "tenant_id": tenant_id})
+        return dict(BASELINE_DOC)
 
-    def update_document(self, index: str, doc_id: str, partial: dict[str, Any]) -> None:
-        self.updated.append({"index": index, "doc_id": doc_id, "partial": partial})
+    def list_logs_by_event_ids(self, event_ids):
+        self.calls.append({"method": "list_logs_by_event_ids", "event_ids": list(event_ids)})
+        return RELATED_LOGS
+
+    def insert_ai_judgement(self, report: AIJudgement) -> None:
+        self.inserted.append(report)
+
+    def update_anomaly_ai_status(self, event_id: str, ai_status: str) -> None:
+        self.updated.append({"event_id": event_id, "ai_status": ai_status})
 
 
 class FakeAnalyzer:
@@ -178,83 +167,49 @@ def test_analyze_alert_requires_context_stores_report_and_updates_alert() -> Non
     assert payload["event_id"] == "anom-1"
     assert payload["attack_type"] == "账号接管"
 
-    assert len(analyzer.calls) == 1
     analyzer_call = analyzer.calls[0]
     assert analyzer_call["event"].event_id == "anom-1"
     assert analyzer_call["baseline"]["user_id"] == "alice"
-    assert "_id" not in analyzer_call["baseline"]
     assert [item["event_id"] for item in analyzer_call["related_logs"]] == ["evt-login", "evt-export"]
-    assert all("_id" not in item for item in analyzer_call["related_logs"])
     assert analyzer_call["window_stats"] == {}
 
-    assert storage.indexed == [
-        {
-            "index": settings.elasticsearch_ai_index,
-            "document": payload,
-            "doc_id": "ai-1",
-        }
-    ]
-    assert storage.updated == [
-        {
-            "index": settings.elasticsearch_alert_index,
-            "doc_id": "anom-1",
-            "partial": {"ai_status": "analyzed"},
-        }
-    ]
+    assert storage.inserted[0].judgement_id == "ai-1"
+    assert storage.updated == [{"event_id": "anom-1", "ai_status": "analyzed"}]
     assert storage.calls == [
-        {
-            "index": settings.elasticsearch_alert_index,
-            "query": {"term": {"event_id": "anom-1"}},
-            "limit": 1,
-            "offset": 0,
-        },
-        {
-            "index": settings.elasticsearch_baseline_index,
-            "query": {"term": {"user_id": "alice"}},
-            "limit": 1,
-            "offset": 0,
-        },
-        {
-            "index": settings.elasticsearch_log_index,
-            "query": {"terms": {"event_id": ["evt-login", "evt-export"]}},
-            "limit": 2,
-            "offset": 0,
-            "sort": [{"event_time": "asc"}],
-        },
+        {"method": "get_anomaly", "event_id": "anom-1"},
+        {"method": "get_user_baseline", "user_id": "alice", "tenant_id": "default"},
+        {"method": "list_logs_by_event_ids", "event_ids": ["evt-login", "evt-export"]},
     ]
 
 
 def test_analyze_alert_returns_clear_404_when_alert_is_missing() -> None:
     storage = FakeAnalyzeStorage()
-    storage.responses[settings.elasticsearch_alert_index] = []
+    storage.anomaly = None
 
     with pytest.raises(HTTPException) as exc_info:
         analyze_alert(event_id="missing-alert", storage=storage, analyzer=FakeAnalyzer())
 
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail == {
-        "code": "alert_not_found",
-        "message": "Alert not found",
-        "details": {
-            "index": settings.elasticsearch_alert_index,
-            "event_id": "missing-alert",
-        },
+        "code": "anomaly_not_found",
+        "message": "Anomaly event not found",
+        "details": {"table": "anomaly_events", "event_id": "missing-alert"},
     }
 
 
 def test_analyze_alert_returns_standard_error_when_alert_query_fails() -> None:
     class FailingQueryStorage(FakeAnalyzeStorage):
-        def search_page(self, **_kwargs):
-            raise RuntimeError("es unavailable")
+        def get_anomaly(self, _event_id: str):
+            raise RuntimeError("clickhouse unavailable")
 
     with pytest.raises(HTTPException) as exc_info:
         analyze_alert(event_id="anom-1", storage=FailingQueryStorage(), analyzer=FakeAnalyzer())
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == {
-        "code": "elasticsearch_query_failed",
-        "message": "Failed to query alert for AI analysis",
-        "details": {"index": settings.elasticsearch_alert_index, "event_id": "anom-1"},
+        "code": "clickhouse_query_failed",
+        "message": "Failed to query anomaly for AI judgement",
+        "details": {"table": "anomaly_events", "event_id": "anom-1"},
     }
 
 
@@ -264,18 +219,14 @@ def test_analyze_alert_returns_standard_error_when_analysis_or_store_fails() -> 
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == {
-        "code": "alert_analysis_failed",
-        "message": "Failed to analyze alert and store AI report",
-        "details": {
-            "event_id": "anom-1",
-            "ai_index": settings.elasticsearch_ai_index,
-            "alert_index": settings.elasticsearch_alert_index,
-        },
+        "code": "ai_judgement_failed",
+        "message": "Failed to judge anomaly and store AI judgement",
+        "details": {"event_id": "anom-1"},
     }
 
 
 def test_analyze_alert_openapi_binds_contract_and_error_shape() -> None:
-    operation = app.openapi()["paths"]["/api/v1/alerts/{event_id}/analyze"]["post"]
+    operation = app.openapi()["paths"]["/api/v1/ai/judge/{event_id}"]["post"]
 
     assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/AIJudgement"

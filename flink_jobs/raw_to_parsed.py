@@ -51,6 +51,7 @@ def to_parsed_json(raw: str) -> str:
 def run_job(bootstrap_servers: str, raw_topic: str, parsed_topic: str, group_id: str) -> None:
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(1)
+    env.enable_checkpointing(10000)
 
     source = (
         KafkaSource.builder()

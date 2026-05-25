@@ -3,140 +3,69 @@ from datetime import datetime, timezone
 import pytest
 from fastapi import HTTPException
 
-from src.api.app import _build_logs_query, app, get_log_detail, list_logs
-from src.config import settings
-from src.storage.elastic_client import ElasticStorage
+from src.api.app import aggregate_logs, app, get_log_detail, list_logs
+from src.schemas import LogAggregateRequest, LogAggregateTimeRange
+
+
+LOG_DOC = {
+    "event_id": "evt-1",
+    "event_time": "2026-05-13T10:00:00Z",
+    "ingest_time": "2026-05-13T10:00:05Z",
+    "tenant_id": "default",
+    "source_type": "vpn",
+    "log_type": "login",
+    "user_id": "alice",
+    "src_ip": "10.0.0.7",
+    "action": "login",
+    "result": "fail",
+    "message": "VPN login failed",
+    "raw_log": "raw vpn line",
+    "risk_tags": [],
+    "attrs": {"vpn_result": "bad_password"},
+}
 
 
 class FakeLogStorage:
-    def __init__(self) -> None:
+    def __init__(self, item: dict[str, object] | None = None) -> None:
+        self.item = item
         self.calls: list[dict[str, object]] = []
 
-    def search_page(self, **kwargs):
-        self.calls.append(kwargs)
-        return (
-            [
-                {
-                    "_id": "es-doc-1",
-                    "event_id": "evt-1",
-                    "event_time": "2026-05-13T10:00:00Z",
-                    "ingest_time": "2026-05-13T10:00:05Z",
-                    "tenant_id": "default",
-                    "source_type": "vpn",
-                    "log_type": "login",
-                    "user_id": "alice",
-                    "src_ip": "10.0.0.7",
-                    "action": "login",
-                    "result": "fail",
-                    "message": "VPN login failed",
-                    "raw_log": "raw vpn line",
-                    "risk_tags": [],
-                    "attrs": {"vpn_result": "bad_password"},
-                }
-            ],
-            7,
-        )
+    def list_logs(self, **kwargs):
+        self.calls.append({"method": "list_logs", **kwargs})
+        return ([LOG_DOC], 7)
+
+    def get_log(self, event_id: str):
+        self.calls.append({"method": "get_log", "event_id": event_id})
+        return self.item
+
+    def aggregate_logs(self, **kwargs):
+        self.calls.append({"method": "aggregate_logs", **kwargs})
+        return [{"user_id": "alice", "result": "fail", "count": 3}]
 
 
-class FakeLogDetailStorage:
-    def __init__(self, items: list[dict[str, object]] | None = None) -> None:
-        self.items = items or []
-        self.calls: list[dict[str, object]] = []
+class FailingLogStorage(FakeLogStorage):
+    def list_logs(self, **_kwargs):
+        raise RuntimeError("clickhouse unavailable")
 
-    def search_page(self, **kwargs):
-        self.calls.append(kwargs)
-        return self.items, len(self.items)
+    def get_log(self, _event_id: str):
+        raise RuntimeError("clickhouse unavailable")
 
-
-def test_logs_query_applies_documented_filters() -> None:
-    start = datetime(2026, 5, 13, 9, 0, tzinfo=timezone.utc)
-    end = datetime(2026, 5, 13, 10, 0, tzinfo=timezone.utc)
-
-    response = list_logs(
-        source_type="vpn",
-        user_id="alice",
-        src_ip="10.0.0.7",
-        result="fail",
-        start_time=start,
-        end_time=end,
-        limit=25,
-        offset=50,
-        storage=FakeLogStorage(),
-    )
-
-    item = response.model_dump(mode="json")["items"][0]
-
-    assert item["event_id"] == "evt-1"
-    assert item["attrs"] == {"vpn_result": "bad_password"}
-    assert "_id" not in item
-    assert response.total == 7
-    assert response.limit == 25
-    assert response.offset == 50
+    def aggregate_logs(self, **_kwargs):
+        raise RuntimeError("clickhouse unavailable")
 
 
-def test_log_detail_queries_security_logs_by_event_id() -> None:
-    storage = FakeLogDetailStorage(
-        [
-            {
-                "_id": "es-doc-1",
-                "event_id": "evt-1",
-                "event_time": "2026-05-13T10:00:00Z",
-                "ingest_time": "2026-05-13T10:00:05Z",
-                "tenant_id": "default",
-                "source_type": "vpn",
-                "log_type": "login",
-                "user_id": "alice",
-                "src_ip": "10.0.0.7",
-                "action": "login",
-                "result": "success",
-                "message": "VPN login success",
-                "raw_log": "raw vpn line",
-                "risk_tags": [],
-                "attrs": {"vpn_result": "ok"},
-            }
-        ]
-    )
-
-    response = get_log_detail(event_id="evt-1", storage=storage)
-    item = response.model_dump(mode="json")
-
-    assert item["event_id"] == "evt-1"
-    assert item["attrs"] == {"vpn_result": "ok"}
-    assert "_id" not in item
-    assert storage.calls == [
-        {
-            "index": settings.elasticsearch_log_index,
-            "query": {"term": {"event_id": "evt-1"}},
-            "limit": 1,
-            "offset": 0,
-        }
-    ]
-
-
-def test_log_detail_returns_clear_404_error_when_missing() -> None:
-    with pytest.raises(HTTPException) as exc_info:
-        get_log_detail(event_id="missing-event", storage=FakeLogDetailStorage())
-
-    assert exc_info.value.status_code == 404
-    assert exc_info.value.detail == {
-        "code": "log_not_found",
-        "message": "Structured log not found",
-        "details": {
-            "index": settings.elasticsearch_log_index,
-            "event_id": "missing-event",
-        },
-    }
-
-
-def test_logs_endpoint_queries_security_logs_with_pagination_and_filters() -> None:
+def test_logs_endpoint_queries_clickhouse_with_pagination_and_filters() -> None:
     storage = FakeLogStorage()
     start = datetime(2026, 5, 13, 9, 0, tzinfo=timezone.utc)
     end = datetime(2026, 5, 13, 10, 0, tzinfo=timezone.utc)
 
-    list_logs(
+    response = list_logs(
+        tenant_id="default",
         source_type="vpn",
+        log_type="login",
         user_id="alice",
         src_ip="10.0.0.7",
+        action="login",
         result="fail",
         start_time=start,
         end_time=end,
@@ -145,49 +74,122 @@ def test_logs_endpoint_queries_security_logs_with_pagination_and_filters() -> No
         storage=storage,
     )
 
+    item = response.model_dump(mode="json")["items"][0]
+
+    assert item["event_id"] == "evt-1"
+    assert item["attrs"] == {"vpn_result": "bad_password"}
+    assert response.total == 7
+    assert response.limit == 25
+    assert response.offset == 50
     assert storage.calls == [
         {
-            "index": settings.elasticsearch_log_index,
-            "query": {
-                "bool": {
-                    "filter": [
-                        {
-                            "range": {
-                                "event_time": {
-                                    "gte": "2026-05-13T09:00:00+00:00",
-                                    "lte": "2026-05-13T10:00:00+00:00",
-                                }
-                            }
-                        },
-                        {"term": {"source_type": "vpn"}},
-                        {"term": {"user_id": "alice"}},
-                        {"term": {"src_ip": "10.0.0.7"}},
-                        {"term": {"result": "fail"}},
-                    ]
-                }
-            },
+            "method": "list_logs",
+            "tenant_id": "default",
+            "source_type": "vpn",
+            "log_type": "login",
+            "user_id": "alice",
+            "src_ip": "10.0.0.7",
+            "action": "login",
+            "result": "fail",
+            "start_time": start,
+            "end_time": end,
             "limit": 25,
             "offset": 50,
-            "sort": [{"event_time": "desc"}],
         }
     ]
 
 
-def test_logs_query_defaults_to_last_24_hours_when_start_time_omitted() -> None:
+def test_log_detail_queries_clickhouse_by_event_id() -> None:
+    storage = FakeLogStorage(item=LOG_DOC | {"result": "success", "attrs": {"vpn_result": "ok"}})
+
+    response = get_log_detail(event_id="evt-1", storage=storage)
+    item = response.model_dump(mode="json")
+
+    assert item["event_id"] == "evt-1"
+    assert item["attrs"] == {"vpn_result": "ok"}
+    assert storage.calls == [{"method": "get_log", "event_id": "evt-1"}]
+
+
+def test_log_detail_returns_clear_404_error_when_missing() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        get_log_detail(event_id="missing-event", storage=FakeLogStorage(item=None))
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == {
+        "code": "log_not_found",
+        "message": "Structured log not found",
+        "details": {"table": "security_logs", "event_id": "missing-event"},
+    }
+
+
+def test_logs_endpoint_returns_standard_error_when_clickhouse_fails() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        list_logs(
+            tenant_id=None,
+            source_type=None,
+            log_type=None,
+            user_id=None,
+            src_ip=None,
+            action=None,
+            result=None,
+            start_time=None,
+            end_time=None,
+            limit=50,
+            offset=0,
+            storage=FailingLogStorage(),
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == {
+        "code": "clickhouse_query_failed",
+        "message": "Failed to query structured logs from ClickHouse",
+        "details": {"table": "security_logs"},
+    }
+
+
+def test_logs_aggregate_calls_clickhouse_adapter() -> None:
+    storage = FakeLogStorage()
+    start = datetime(2026, 5, 13, 9, 0, tzinfo=timezone.utc)
     end = datetime(2026, 5, 13, 10, 0, tzinfo=timezone.utc)
 
-    query = _build_logs_query(end_time=end)
+    response = aggregate_logs(
+        request=LogAggregateRequest(
+            time_range=LogAggregateTimeRange(from_=start, to=end),
+            filters={"tenant_id": "default", "source_type": "vpn"},
+            group_by=["user_id", "result"],
+            metrics=["count"],
+            limit=20,
+        ),
+        storage=storage,
+    )
 
-    assert query["bool"]["filter"] == [
+    assert response.model_dump(mode="json") == {"items": [{"user_id": "alice", "result": "fail", "count": 3}]}
+    assert storage.calls == [
         {
-            "range": {
-                "event_time": {
-                    "gte": "2026-05-12T10:00:00+00:00",
-                    "lte": "2026-05-13T10:00:00+00:00",
-                }
-            }
+            "method": "aggregate_logs",
+            "time_from": start,
+            "time_to": end,
+            "filters": {"tenant_id": "default", "source_type": "vpn"},
+            "group_by": ["user_id", "result"],
+            "metrics": ["count"],
+            "limit": 20,
         }
     ]
+
+
+def test_logs_aggregate_rejects_invalid_fields() -> None:
+    class InvalidAggregateStorage(FakeLogStorage):
+        def aggregate_logs(self, **_kwargs):
+            raise ValueError("Unsupported group_by: raw_log")
+
+    with pytest.raises(HTTPException) as exc_info:
+        aggregate_logs(
+            request=LogAggregateRequest(group_by=["raw_log"]),
+            storage=InvalidAggregateStorage(),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail["code"] == "invalid_log_aggregate_request"
 
 
 def test_logs_openapi_binds_contract_and_error_shape() -> None:
@@ -215,41 +217,15 @@ def test_log_detail_openapi_binds_contract_and_error_shape() -> None:
     }
 
 
-def test_elastic_search_page_uses_offset_limit_sort_and_total_hits() -> None:
-    class FakeClient:
-        def __init__(self) -> None:
-            self.call: dict[str, object] | None = None
+def test_logs_aggregate_openapi_binds_contract_and_error_shape() -> None:
+    operation = app.openapi()["paths"]["/api/v1/logs/aggregate"]["post"]
 
-        def search(self, *, index: str, body: dict[str, object]):
-            self.call = {"index": index, "body": body}
-            return {
-                "hits": {
-                    "total": {"value": 12, "relation": "eq"},
-                    "hits": [{"_id": "doc-1", "_source": {"event_id": "evt-1"}}],
-                }
-            }
-
-    client = FakeClient()
-    storage = ElasticStorage.__new__(ElasticStorage)
-    storage.client = client
-
-    items, total = storage.search_page(
-        index="security-logs",
-        query={"match_all": {}},
-        limit=10,
-        offset=20,
-        sort=[{"event_time": "desc"}],
-    )
-
-    assert items == [{"event_id": "evt-1", "_id": "doc-1"}]
-    assert total == 12
-    assert client.call == {
-        "index": "security-logs",
-        "body": {
-            "query": {"match_all": {}},
-            "from": 20,
-            "size": 10,
-            "track_total_hits": True,
-            "sort": [{"event_time": "desc"}],
-        },
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/LogAggregateResponse"
+    }
+    assert operation["responses"]["400"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
+    }
+    assert operation["responses"]["500"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
     }

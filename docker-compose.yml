@@ -70,7 +70,12 @@ services:
       retries: 12
 
   flink-jobmanager:
-    image: ${FLINK_IMAGE:-flink:1.18.1}
+    build:
+      context: .
+      dockerfile: docker/flink-python.Dockerfile
+      args:
+        FLINK_BASE_IMAGE: ${FLINK_IMAGE:-flink:1.18.1}
+    image: log-ai-assistant-flink-python
     container_name: flink-jobmanager
     command: jobmanager
     ports:
@@ -87,7 +92,7 @@ services:
       retries: 10
 
   flink-taskmanager:
-    image: ${FLINK_IMAGE:-flink:1.18.1}
+    image: log-ai-assistant-flink-python
     container_name: flink-taskmanager
     command: taskmanager
     depends_on:
@@ -209,7 +214,7 @@ services:
       - ./logs:/var/log/app
 
   flink-submit:
-    image: ${FLINK_IMAGE:-flink:1.18.1}
+    image: log-ai-assistant-flink-python
     container_name: flink-submit
     profiles: ["jobs"]
     working_dir: /opt/app
@@ -234,6 +239,7 @@ services:
       - -lc
       - |
         flink run -m flink-jobmanager:8081 -py /opt/app/flink_jobs/raw_to_parsed.py \
+          --pyFiles /opt/app \
           --bootstrap-servers "$$KAFKA_BOOTSTRAP_SERVERS" \
           --raw-topic "$$KAFKA_RAW_TOPIC" \
           --parsed-topic "$$KAFKA_PARSED_TOPIC"
@@ -258,6 +264,7 @@ services:
     volumes:
       - ./src:/app/src:ro
       - ./tests:/app/tests:ro
+      - ./sql:/app/sql:ro
     command: ["pytest", "-q"]
 
   elasticsearch:

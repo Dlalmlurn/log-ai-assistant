@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 if __package__ is None or __package__ == "":
@@ -20,7 +21,7 @@ from src.health import get_cli_health_payload
 from src.parser import normalize_raw_record, run_raw_to_parsed_worker
 from src.report import generate_daily_report
 from src.schemas import AnomalyEvent, NormalizedLog
-from src.storage import ElasticStorage, KafkaToElasticConsumer
+from src.storage import ClickHouseStorage
 from src.ueba import build_and_store_baselines
 
 
@@ -52,9 +53,9 @@ def ensure_topics() -> None:
 
 def cmd_init(_: argparse.Namespace) -> None:
     ensure_topics()
-    es = ElasticStorage()
-    es.ensure_indices()
-    print("Init completed: Kafka topics + Elasticsearch indices are ready.")
+    storage = ClickHouseStorage()
+    clickhouse_ok = storage.health()
+    print(f"Init completed: Kafka topics are ready; ClickHouse connection={'ok' if clickhouse_ok else 'failed'}.")
 
 
 def cmd_inspect_generator(args: argparse.Namespace) -> None:
@@ -121,15 +122,6 @@ def cmd_produce(args: argparse.Namespace) -> None:
     print(f"Produced {sent} lines to Kafka topic: {settings.kafka_raw_topic}")
 
 
-def cmd_consume_to_es(args: argparse.Namespace) -> None:
-    runner = KafkaToElasticConsumer(
-        consumer_timeout_ms=args.idle_timeout_ms,
-        group_id=args.group_id,
-    )
-    consumed = runner.run(max_messages=args.max_messages)
-    print(f"consume-to-es finished, processed records={consumed}")
-
-
 def cmd_process_raw(args: argparse.Namespace) -> None:
     processed = run_raw_to_parsed_worker(
         max_messages=args.max_messages,
@@ -141,26 +133,27 @@ def cmd_process_raw(args: argparse.Namespace) -> None:
 
 
 def cmd_build_baseline(_: argparse.Namespace) -> None:
-    storage = ElasticStorage()
-    storage.ensure_indices()
+    storage = ClickHouseStorage()
     output = PROJECT_ROOT / "data" / "user_baselines.json"
     baselines = build_and_store_baselines(storage, output_path=output)
     print(f"built baselines={len(baselines)}, output={output}")
 
 
 def cmd_detect(args: argparse.Namespace) -> None:
-    storage = ElasticStorage()
-    logs = storage.fetch_recent_logs(hours=args.hours, size=args.size)
+    storage = ClickHouseStorage()
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(hours=args.hours)
+    logs, _total = storage.list_logs(start_time=start_time, end_time=end_time, limit=args.size, offset=0)
     normalized = [NormalizedLog.model_validate(item) for item in logs]
     anomalies = detect_batch(normalized)
-    alert_docs = [a.model_dump(mode="json") for a in anomalies]
-    storage.bulk_index(settings.elasticsearch_alert_index, alert_docs, id_field="event_id")
+    storage.insert_anomalies(anomalies)
+    anomaly_docs = [a.model_dump(mode="json") for a in anomalies]
 
     producer = KafkaProducer(
         bootstrap_servers=settings.kafka_bootstrap_servers,
         value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode("utf-8"),
     )
-    for item in alert_docs:
+    for item in anomaly_docs:
         producer.send(settings.kafka_alert_topic, item)
     producer.flush()
     producer.close()
@@ -169,23 +162,13 @@ def cmd_detect(args: argparse.Namespace) -> None:
 
 
 def cmd_analyze_alerts(args: argparse.Namespace) -> None:
-    storage = ElasticStorage()
+    storage = ClickHouseStorage()
     analyzer = AIAnalyzer()
 
-    query = {
-        "bool": {
-            "must_not": [{"term": {"ai_status": "analyzed"}}],
-        }
-    }
-    pending = storage.search(
-        settings.elasticsearch_alert_index,
-        query=query,
-        size=args.limit,
-        sort=[{"detect_time": "desc"}],
-    )
+    pending, _total = storage.list_anomalies(ai_status="pending", limit=args.limit, offset=0)
 
     if not pending:
-        print("no pending alerts to analyze")
+        print("no pending anomalies to analyze")
         return
 
     producer = KafkaProducer(
@@ -196,30 +179,13 @@ def cmd_analyze_alerts(args: argparse.Namespace) -> None:
     analyzed = 0
     for item in pending:
         alert = AnomalyEvent.model_validate(item)
-        baseline = {}
-        if alert.user_id:
-            rows = storage.search(
-                settings.elasticsearch_baseline_index,
-                query={"term": {"user_id": alert.user_id}},
-                size=1,
-            )
-            baseline = rows[0] if rows else {}
-
-        related_logs = storage.search(
-            settings.elasticsearch_log_index,
-            query={"terms": {"event_id": alert.related_event_ids}},
-            size=100,
-        )
+        baseline = storage.get_user_baseline(alert.user_id) if alert.user_id else {}
+        related_logs = storage.list_logs_by_event_ids(alert.related_event_ids)
 
         report = analyzer.analyze(event=alert, baseline=baseline, related_logs=related_logs)
-        report_doc = report.model_dump(mode="json")
-        storage.index_document(settings.elasticsearch_ai_index, report_doc, doc_id=report.judgement_id)
-        storage.update_document(
-            settings.elasticsearch_alert_index,
-            alert.event_id,
-            {"ai_status": "analyzed"},
-        )
-        producer.send(settings.kafka_ai_topic, report_doc)
+        storage.insert_ai_judgement(report)
+        storage.update_anomaly_ai_status(alert.event_id, "analyzed")
+        producer.send(settings.kafka_ai_topic, report.model_dump(mode="json"))
         analyzed += 1
 
     producer.flush()
@@ -228,10 +194,9 @@ def cmd_analyze_alerts(args: argparse.Namespace) -> None:
 
 
 def cmd_report(args: argparse.Namespace) -> None:
-    storage = ElasticStorage()
+    storage = ClickHouseStorage()
     report = generate_daily_report(storage, date_str=args.date)
-    doc = report.model_dump(mode="json")
-    storage.index_document(settings.elasticsearch_daily_index, doc, doc_id=report.report_id)
+    storage.insert_daily_report(report)
 
     out_path = PROJECT_ROOT / "data" / f"daily_report_{report.date}.md"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -248,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Log Analysis AI Assistant CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_init = sub.add_parser("init", help="初始化 Elasticsearch 索引和 Kafka topics")
+    p_init = sub.add_parser("init", help="初始化 Kafka topics 并检查 ClickHouse 连接")
     p_init.set_defaults(func=cmd_init)
 
     p_inspect = sub.add_parser("inspect-generator", help="检查导师 log-generator 输出格式")
@@ -266,12 +231,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_produce.add_argument("--follow", action="store_true", help="持续监听文件新增内容")
     p_produce.set_defaults(func=cmd_produce)
 
-    p_consume = sub.add_parser("consume-to-es", help="消费 parsed_logs/alert_events 写入 Elasticsearch")
-    p_consume.add_argument("--max-messages", type=int, default=None)
-    p_consume.add_argument("--idle-timeout-ms", type=int, default=5000, help="空闲超时后退出，-1 表示持续运行")
-    p_consume.add_argument("--group-id", default="log-ai-consume-to-es")
-    p_consume.set_defaults(func=cmd_consume_to_es)
-
     p_process = sub.add_parser("process-raw", help="Python fallback: 消费 raw_logs 转换并写入 parsed_logs")
     p_process.add_argument("--max-messages", type=int, default=None)
     p_process.add_argument("--from-latest", action="store_true", help="从最新offset开始消费（默认从最早）")
@@ -279,7 +238,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_process.add_argument("--group-id", default="python-raw-to-parsed")
     p_process.set_defaults(func=cmd_process_raw)
 
-    p_baseline = sub.add_parser("build-baseline", help="从 Elasticsearch 生成用户行为基线")
+    p_baseline = sub.add_parser("build-baseline", help="从 ClickHouse security_logs 生成用户行为基线")
     p_baseline.set_defaults(func=cmd_build_baseline)
 
     p_detect = sub.add_parser("detect", help="执行离线/准实时异常检测")
@@ -295,7 +254,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_report.add_argument("--date", default=None, help="YYYY-MM-DD")
     p_report.set_defaults(func=cmd_report)
 
-    p_health = sub.add_parser("health", help="检查 Kafka/ES/Flink/DashScope 状态")
+    p_health = sub.add_parser("health", help="检查 Kafka/ClickHouse/Flink/DashScope 状态")
     p_health.set_defaults(func=cmd_health)
 
     return parser

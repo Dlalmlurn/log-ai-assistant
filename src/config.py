@@ -41,13 +41,6 @@ class Settings:
     clickhouse_user: str
     clickhouse_password: str
 
-    elasticsearch_url: str
-    elasticsearch_log_index: str
-    elasticsearch_alert_index: str
-    elasticsearch_ai_index: str
-    elasticsearch_daily_index: str
-    elasticsearch_baseline_index: str
-
     flink_dashboard_url: str
 
     dashscope_api_key: str
@@ -82,12 +75,6 @@ settings = Settings(
     clickhouse_database=os.getenv("CLICKHOUSE_DATABASE", "log_ai"),
     clickhouse_user=os.getenv("CLICKHOUSE_USER", "default"),
     clickhouse_password=os.getenv("CLICKHOUSE_PASSWORD", ""),
-    elasticsearch_url=os.getenv("ELASTICSEARCH_URL", "http://localhost:9200"),
-    elasticsearch_log_index=os.getenv("ELASTICSEARCH_LOG_INDEX", "security-logs"),
-    elasticsearch_alert_index=os.getenv("ELASTICSEARCH_ALERT_INDEX", "security-alerts"),
-    elasticsearch_ai_index=os.getenv("ELASTICSEARCH_AI_INDEX", "ai-reports"),
-    elasticsearch_daily_index=os.getenv("ELASTICSEARCH_DAILY_INDEX", "daily-reports"),
-    elasticsearch_baseline_index=os.getenv("ELASTICSEARCH_BASELINE_INDEX", "user-baselines"),
     flink_dashboard_url=os.getenv("FLINK_DASHBOARD_URL", "http://localhost:8081"),
     dashscope_api_key=os.getenv("DASHSCOPE_API_KEY", ""),
     dashscope_model=os.getenv("DASHSCOPE_MODEL", "qwen-plus"),

@@ -246,6 +246,31 @@ class BaselineRebuildResponse(BaseModel):
     rebuilt_count: int = Field(ge=0)
 
 
+class LogAggregateTimeRange(BaseModel):
+    """Time window for ClickHouse-backed log aggregation."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: datetime | None = Field(default=None, alias="from")
+    to: datetime | None = None
+
+
+class LogAggregateRequest(BaseModel):
+    """Request body for aggregating normalized logs."""
+
+    time_range: LogAggregateTimeRange | None = None
+    filters: dict[str, Any] = Field(default_factory=dict)
+    group_by: list[str] = Field(default_factory=lambda: ["event_date"])
+    metrics: list[str] = Field(default_factory=lambda: ["count"])
+    limit: int = Field(default=500, ge=1)
+
+
+class LogAggregateResponse(BaseModel):
+    """Generic row response for log aggregation results."""
+
+    items: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class EvidenceChain(BaseModel):
     """Evidence summary for anomaly detail views and AI context."""
 

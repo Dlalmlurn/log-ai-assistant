@@ -175,7 +175,7 @@ export type LogsQuery = {
 export type AlertsQuery = {
   risk_level?: RiskLevel | "";
   user_id?: string;
-  rule?: string;
+  reason_code?: string;
   status?: string;
   start_time?: string;
   end_time?: string;
