@@ -5,11 +5,12 @@ from typing import Any
 
 import pytest
 
-from src.schemas import AIFeedback, AIJudgement
+from src.schemas import AIFeedback, AIJudgement, DataQualityMetric
 from src.storage.clickhouse_client import (
     AI_FEEDBACK_COLUMNS,
     AI_JUDGEMENT_COLUMNS,
     BASELINE_COLUMNS,
+    DATA_QUALITY_COLUMNS,
     DAILY_REPORT_COLUMNS,
     LOG_COLUMNS,
     ANOMALY_COLUMNS,
@@ -296,6 +297,103 @@ def test_ai_judgement_and_feedback_inserts_use_table_columns_and_json_strings() 
     feedback_row = dict(zip(AI_FEEDBACK_COLUMNS, fake.inserts[1]["data"][0]))
     assert feedback_row["judgement_id"] == ""
     assert feedback_row["review_status"] == "pending"
+
+
+def test_data_quality_metric_insert_uses_table_columns() -> None:
+    now = datetime(2026, 5, 13, 10, 0, tzinfo=timezone.utc)
+    fake = FakeClickHouseClient([])
+    storage = ClickHouseStorage(client=fake)
+
+    storage.insert_data_quality_metrics(
+        [
+            DataQualityMetric(
+                metric_date=date(2026, 5, 13),
+                tenant_id="default",
+                source_type="api",
+                generated_count=10,
+                injected_anomaly_count=2,
+                injected_high_risk_count=1,
+                raw_logs_count=10,
+                parsed_logs_count=9,
+                clickhouse_insert_count=9,
+                security_logs_count=9,
+                raw_size_bytes=1000,
+                table_size_bytes=500,
+                compression_ratio=2.0,
+                missing_event_time_rate=0,
+                missing_user_id_rate=0.1,
+                missing_src_ip_rate=0,
+                missing_action_rate=0,
+                missing_result_rate=0,
+                parse_error_rate=0.1,
+                created_at=now,
+            )
+        ]
+    )
+
+    assert fake.inserts[0]["table"] == "data_quality_metrics"
+    assert fake.inserts[0]["column_names"] == list(DATA_QUALITY_COLUMNS)
+    row = dict(zip(DATA_QUALITY_COLUMNS, fake.inserts[0]["data"][0]))
+    assert row["source_type"] == "api"
+    assert row["generated_count"] == 10
+    assert row["compression_ratio"] == 2.0
+
+
+def test_security_log_quality_stats_queries_by_event_ids() -> None:
+    fake = FakeClickHouseClient(
+        [
+            QueryResult(
+                [(2, 0, 1, 0, 0, 0, 1)],
+                [
+                    "security_logs_count",
+                    "missing_event_time_count",
+                    "missing_user_id_count",
+                    "missing_src_ip_count",
+                    "missing_action_count",
+                    "missing_result_count",
+                    "parse_error_count",
+                ],
+            )
+        ]
+    )
+    storage = ClickHouseStorage(client=fake)
+
+    stats = storage.security_log_quality_stats(["evt-1", "evt-2"])
+
+    assert stats["security_logs_count"] == 2
+    assert stats["missing_user_id_count"] == 1
+    assert stats["parse_error_count"] == 1
+    assert "FROM security_logs FINAL WHERE event_id IN {event_ids:Array(String)}" in fake.queries[0]["sql"]
+    assert fake.queries[0]["parameters"] == {"event_ids": ["evt-1", "evt-2"]}
+
+
+def test_security_log_quality_stats_falls_back_when_final_is_unsupported() -> None:
+    class FinalFailClient(FakeClickHouseClient):
+        def query(self, sql: str, parameters: dict[str, Any] | None = None) -> QueryResult:
+            self.queries.append({"sql": _compact_sql(sql), "parameters": parameters or {}})
+            if "FINAL" in sql:
+                raise RuntimeError("Storage MergeTree doesn't support FINAL")
+            return QueryResult(
+                [(1, 0, 0, 0, 0, 0, 0)],
+                [
+                    "security_logs_count",
+                    "missing_event_time_count",
+                    "missing_user_id_count",
+                    "missing_src_ip_count",
+                    "missing_action_count",
+                    "missing_result_count",
+                    "parse_error_count",
+                ],
+            )
+
+    fake = FinalFailClient([])
+    storage = ClickHouseStorage(client=fake)
+
+    stats = storage.security_log_quality_stats(["evt-1"])
+
+    assert stats["security_logs_count"] == 1
+    assert "FROM security_logs FINAL" in fake.queries[0]["sql"]
+    assert "FROM security_logs WHERE event_id IN" in fake.queries[1]["sql"]
 
 
 def test_list_daily_reports_maps_clickhouse_report_shape_to_api_shape() -> None:

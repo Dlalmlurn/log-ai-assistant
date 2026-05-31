@@ -12,6 +12,7 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 import ipaddress
 import math
+import uuid
 
 # ─────────────────────────────────────────────
 # 基础数据定义
@@ -62,6 +63,8 @@ FAIL_REASONS  = ["密码错误", "账号锁定", "证书过期", "OTP验证失�
 
 @dataclass
 class VPNLogEntry:
+    # Stable ID that should survive Filebeat, Kafka, Flink and ClickHouse.
+    event_id: str
     # When
     timestamp: str
     # Who
@@ -127,8 +130,10 @@ def ip_to_geo(ip: str):
     return geo_map.get(prefix, ("未知", "未知"))
 
 def gen_session_id() -> str:
-    import uuid
     return str(uuid.uuid4()).upper()[:16]
+
+def gen_event_id(prefix: str = "evt") -> str:
+    return f"{prefix}-{uuid.uuid4()}"
 
 def is_off_hours(dt: datetime, user: dict) -> bool:
     h_start, h_end = user["usual_hours"]
@@ -199,6 +204,7 @@ def gen_normal_login(user: dict, dt: datetime) -> VPNLogEntry:
     unu = is_unusual_ip(user["username"], src_ip)
 
     base = dict(
+        event_id=gen_event_id("vpn"),
         timestamp=dt.strftime("%Y-%m-%d %H:%M:%S"),
         username=user["username"], dept=user["dept"], role=user["role"],
         src_ip=src_ip, src_country=country, src_city=city,
@@ -235,6 +241,7 @@ def gen_failed_login(user: dict, dt: datetime, anomaly_ip=False) -> VPNLogEntry:
     unu = is_unusual_ip(user["username"], src_ip)
 
     base = dict(
+        event_id=gen_event_id("vpn"),
         timestamp=dt.strftime("%Y-%m-%d %H:%M:%S"),
         username=user["username"], dept=user["dept"], role=user["role"],
         src_ip=src_ip, src_country=country, src_city=city,
@@ -267,6 +274,7 @@ def gen_anomaly_large_download(user: dict, dt: datetime) -> VPNLogEntry:
     unu = is_unusual_ip(user["username"], src_ip)
 
     base = dict(
+        event_id=gen_event_id("vpn"),
         timestamp=dt.strftime("%Y-%m-%d %H:%M:%S"),
         username=user["username"], dept=user["dept"], role=user["role"],
         src_ip=src_ip, src_country=country, src_city=city,
@@ -369,7 +377,7 @@ def to_syslog(logs: list[VPNLogEntry], path: str):
             d = asdict(log)
             line = (
                 f"{d['timestamp']} {d['vpn_gateway']} vpnd: "
-                f"event={d['event_type']} user={d['username']} dept={d['dept']} "
+                f"event_id={d['event_id']} event={d['event_type']} user={d['username']} dept={d['dept']} "
                 f"src_ip={d['src_ip']} src_geo={d['src_country']}/{d['src_city']} "
                 f"proto={d['protocol']} auth={d['auth_method']} "
                 f"client=\"{d['client_software']}\" session={d['session_id']} "

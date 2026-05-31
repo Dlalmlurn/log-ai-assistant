@@ -3,13 +3,78 @@ filebeat.inputs:
     id: vpn-log-input
     enabled: true
     paths:
-      - /var/log/app/vpn_logs.log
+      - /var/log/app/vpn.log
+    processors:
+      - add_fields:
+          target: ''
+          fields:
+            source_type: vpn
 
-processors:
-  - add_fields:
-      target: ''
-      fields:
-        source_type: vpn
+  - type: filestream
+    id: oa-log-input
+    enabled: true
+    paths:
+      - /var/log/app/oa.log
+    processors:
+      - add_fields:
+          target: ''
+          fields:
+            source_type: oa
+
+  - type: filestream
+    id: api-log-input
+    enabled: true
+    paths:
+      - /var/log/app/api.log
+    processors:
+      - add_fields:
+          target: ''
+          fields:
+            source_type: api
+
+  - type: filestream
+    id: system-log-input
+    enabled: true
+    paths:
+      - /var/log/app/system.log
+    processors:
+      - add_fields:
+          target: ''
+          fields:
+            source_type: system
+
+  - type: filestream
+    id: file-log-input
+    enabled: true
+    paths:
+      - /var/log/app/file.log
+    processors:
+      - add_fields:
+          target: ''
+          fields:
+            source_type: file
+
+  - type: filestream
+    id: database-log-input
+    enabled: true
+    paths:
+      - /var/log/app/database.log
+    processors:
+      - add_fields:
+          target: ''
+          fields:
+            source_type: database
+
+  - type: filestream
+    id: security-device-log-input
+    enabled: true
+    paths:
+      - /var/log/app/security_device.log
+    processors:
+      - add_fields:
+          target: ''
+          fields:
+            source_type: security_device
 
 output.kafka:
   hosts: ["kafka:9092"]

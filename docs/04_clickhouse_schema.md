@@ -79,9 +79,9 @@ CREATE TABLE security_logs
     risk_tags Array(String) DEFAULT [],
     attrs JSON DEFAULT '{}'
 )
-ENGINE = MergeTree
+ENGINE = ReplacingMergeTree(ingest_time)
 PARTITION BY toYYYYMM(event_time)
-ORDER BY (tenant_id, event_date, user_id, src_ip, source_type, event_time)
+ORDER BY (tenant_id, event_id, event_date, user_id, src_ip, source_type, event_time)
 TTL event_time + INTERVAL 90 DAY DELETE;
 ```
 
@@ -94,6 +94,7 @@ TTL event_time + INTERVAL 90 DAY DELETE;
 - 按来源 IP 分析异常来源。
 - 按日志类型过滤。
 - 按时间排序查看事件过程。
+- 基于生成器写入的全局 `event_id` 对 Filebeat 或 Kafka 重试造成的重复投递做最终合并。
 
 `user_id` 和 `src_ip` 在数据契约中可以为空，但它们是高频过滤字段，所以表中使用空字符串作为缺失默认值，而不是 `Nullable`。
 

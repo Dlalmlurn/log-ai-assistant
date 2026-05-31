@@ -146,6 +146,7 @@ services:
       - "${FASTAPI_HOST_PORT:-8000}:8000"
     volumes:
       - ./src:/app/src:ro
+      - ./logs:/var/log/app:ro
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -190,7 +191,9 @@ services:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
     container_name: log-generator
     environment:
-      LOG_GENERATOR_OUTPUT: ${LOG_GENERATOR_OUTPUT:-/var/log/app/vpn_logs.log}
+      LOG_GENERATOR_OUTPUT_DIR: ${LOG_GENERATOR_OUTPUT_DIR:-/var/log/app}
+      LOG_GENERATOR_MANIFEST: ${LOG_GENERATOR_MANIFEST:-/var/log/app/manifest.jsonl}
+      LOG_GENERATOR_CONFIG: ${LOG_GENERATOR_CONFIG:-/app/log-generator/scenarios/default.json}
       LOG_GENERATOR_INTERVAL_SECONDS: ${LOG_GENERATOR_INTERVAL_SECONDS:-5}
       LOG_GENERATOR_BATCH_SIZE: ${LOG_GENERATOR_BATCH_SIZE:-3}
       LOG_GENERATOR_SEED: ${LOG_GENERATOR_SEED:-42}
@@ -206,7 +209,9 @@ services:
     container_name: log-generator-scale
     profiles: ["scale"]
     environment:
-      LOG_GENERATOR_OUTPUT: ${LOG_GENERATOR_OUTPUT:-/var/log/app/vpn_logs.log}
+      LOG_GENERATOR_OUTPUT_DIR: ${LOG_GENERATOR_OUTPUT_DIR:-/var/log/app}
+      LOG_GENERATOR_MANIFEST: ${LOG_GENERATOR_MANIFEST:-/var/log/app/manifest.jsonl}
+      LOG_GENERATOR_CONFIG: ${LOG_GENERATOR_CONFIG:-/app/log-generator/scenarios/default.json}
       LOG_GENERATOR_INTERVAL_SECONDS: ${LOG_GENERATOR_SCALE_INTERVAL_SECONDS:-1}
       LOG_GENERATOR_BATCH_SIZE: ${LOG_GENERATOR_SCALE_BATCH_SIZE:-50}
       LOG_GENERATOR_SEED: ${LOG_GENERATOR_SCALE_SEED:-4242}
