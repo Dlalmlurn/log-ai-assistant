@@ -39,6 +39,8 @@ def _to_result(result: str | None, event_type: str | None) -> str:
         return "fail"
     if normalized in {"DENIED", "BLOCKED"}:
         return "denied"
+    if normalized in {"ERROR", "CRITICAL"}:
+        return "error"
     ev = (event_type or "").upper()
     if "FAIL" in ev:
         return "fail"
@@ -164,6 +166,9 @@ def normalize_raw_record(payload: str | dict[str, Any], source_type_hint: str = 
 def _build_normalized(parsed: dict[str, Any], raw_log: str, source_type: str) -> NormalizedLog:
     event_time = _parse_time(parsed.get("timestamp") or parsed.get("event_time"))
     ingest_time = datetime.now(timezone.utc)
+    resolved_source_type = str(parsed.get("source_type") or source_type)
+    if resolved_source_type not in VALID_SOURCE_TYPES:
+        resolved_source_type = "vpn"
 
     user_id = parsed.get("user_id") or parsed.get("username") or parsed.get("user")
     src_ip = parsed.get("src_ip")
@@ -175,7 +180,7 @@ def _build_normalized(parsed: dict[str, Any], raw_log: str, source_type: str) ->
         dst_ip = None
 
     resource = parsed.get("resource") or dst_ip or parsed.get("vpn_gateway")
-    action = _to_action(source_type, event_type, resource)
+    action = str(parsed.get("action") or _to_action(resolved_source_type, event_type, resource))
     result = _to_result(raw_result, event_type)
 
     risk_tags_raw = parsed.get("risk_tags")
@@ -204,12 +209,12 @@ def _build_normalized(parsed: dict[str, Any], raw_log: str, source_type: str) ->
     }
 
     normalized = {
-        "event_id": str(uuid.uuid4()),
+        "event_id": str(parsed.get("event_id") or uuid.uuid4()),
         "event_time": event_time,
         "ingest_time": ingest_time,
         "tenant_id": str(parsed.get("tenant_id") or "default"),
-        "source_type": source_type if source_type in VALID_SOURCE_TYPES else "vpn",
-        "log_type": str(parsed.get("log_type") or event_type or source_type).lower(),
+        "source_type": resolved_source_type,
+        "log_type": str(parsed.get("log_type") or event_type or resolved_source_type).lower(),
         "user_id": user_id,
         "account_type": parsed.get("account_type") or "unknown",
         "user_role": parsed.get("user_role") or parsed.get("role"),

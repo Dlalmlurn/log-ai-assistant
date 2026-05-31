@@ -36,3 +36,5 @@ def test_clickhouse_init_sql_wires_parsed_logs_kafka_sink() -> None:
     assert "FROM log_ai.parsed_logs_kafka_queue" in sql
     assert "JSONExtractString(raw, 'event_id')" in sql
     assert "JSONExtract(raw, 'risk_tags', 'Array(String)')" in sql
+    assert "ENGINE = ReplacingMergeTree(ingest_time)" in sql
+    assert "ORDER BY (tenant_id, event_id, event_date, user_id, src_ip, source_type, event_time)" in sql

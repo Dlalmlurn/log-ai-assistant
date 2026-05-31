@@ -156,6 +156,7 @@ VPN 会话中的大流量可以作为数据外传风险信号。
 用于模型训练、质量评估和异常分析的数据，应支持可追踪场景标识。
 
 同一攻击过程中的多条日志应共享 `attack_chain_id`，并通过 `step_index` 标明顺序。
+每条生成日志还必须包含全局唯一 `event_id`，该 ID 需要原封不动穿过 Filebeat、Kafka、Flink 和 ClickHouse，用于 manifest 与 `security_logs` 对账，并为重复投递去重提供依据。
 
 建议字段：
 

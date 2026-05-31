@@ -40,9 +40,9 @@ CREATE TABLE IF NOT EXISTS log_ai.security_logs
     risk_tags Array(String) DEFAULT [],
     attrs String DEFAULT '{}'
 )
-ENGINE = MergeTree
+ENGINE = ReplacingMergeTree(ingest_time)
 PARTITION BY toYYYYMM(event_time)
-ORDER BY (tenant_id, event_date, user_id, src_ip, source_type, event_time)
+ORDER BY (tenant_id, event_id, event_date, user_id, src_ip, source_type, event_time)
 TTL toDateTime(event_time) + INTERVAL 90 DAY DELETE;
 
 CREATE TABLE IF NOT EXISTS log_ai.parsed_logs_kafka_queue

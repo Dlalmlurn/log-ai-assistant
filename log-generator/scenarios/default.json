@@ -1,0 +1,225 @@
+{
+  "tenant_id": "default",
+  "normal_workload": {
+    "source_mix": {
+      "vpn": 0.18,
+      "oa": 0.18,
+      "api": 0.22,
+      "system": 0.12,
+      "file": 0.12,
+      "database": 0.10,
+      "security_device": 0.08
+    }
+  },
+  "stream": {
+    "anomaly_chain_probability": 0.12
+  },
+  "anomaly_patterns": [
+    {
+      "name": "brute_force_vpn",
+      "type": "brute_force",
+      "enabled": true,
+      "chains_per_window": 2,
+      "target_account_type": "employee",
+      "target_user_count": 1,
+      "steps": [
+        {
+          "source_type": "vpn",
+          "repeat": 8,
+          "spacing_seconds": 6,
+          "src_ip_mode": "attacker",
+          "action": "login",
+          "log_type": "vpn_login",
+          "resource": "vpn-gw-bj01",
+          "result": "fail",
+          "severity": 6,
+          "message": "VPN login failed from repeated source",
+          "risk_tags": ["failed_login_spike"],
+          "injected_label": "attack_brute_force"
+        }
+      ]
+    },
+    {
+      "name": "credential_stuffing_vpn",
+      "type": "credential_stuffing",
+      "enabled": true,
+      "chains_per_window": 2,
+      "target_user_count": 6,
+      "steps": [
+        {
+          "source_type": "vpn",
+          "repeat": 10,
+          "spacing_seconds": 4,
+          "user_mode": "rotate",
+          "src_ip_mode": "attacker",
+          "action": "login",
+          "log_type": "vpn_login",
+          "resource": "vpn-gw-sh02",
+          "result": "fail",
+          "severity": 7,
+          "message": "VPN login failed across multiple users",
+          "risk_tags": ["credential_stuffing_pattern"],
+          "injected_label": "attack_credential_stuffing"
+        }
+      ]
+    },
+    {
+      "name": "account_takeover_export",
+      "type": "account_takeover",
+      "enabled": true,
+      "chains_per_window": 1,
+      "target_account_type": "employee",
+      "target_user_count": 1,
+      "steps": [
+        {
+          "source_type": "vpn",
+          "src_ip_mode": "attacker",
+          "action": "login",
+          "log_type": "vpn_login",
+          "resource": "vpn-gw-bj01",
+          "result": "success",
+          "severity": 5,
+          "message": "VPN login success from unusual source",
+          "risk_tags": ["new_source_ip"],
+          "injected_label": "attack_account_takeover"
+        },
+        {
+          "source_type": "api",
+          "offset_seconds": 45,
+          "src_ip_mode": "same_as_chain",
+          "action": "api_call",
+          "log_type": "api_access",
+          "resource": "/api/admin/export",
+          "object_type": "api",
+          "result": "success",
+          "severity": 8,
+          "message": "Admin export API called after unusual VPN login",
+          "risk_tags": ["new_source_then_sensitive_access", "sensitive_resource_access"],
+          "injected_label": "attack_account_takeover"
+        },
+        {
+          "source_type": "file",
+          "offset_seconds": 90,
+          "src_ip_mode": "same_as_chain",
+          "action": "download",
+          "log_type": "file_access",
+          "resource": "/finance/q4_salary.xlsx",
+          "object_type": "file",
+          "result": "success",
+          "severity": 9,
+          "message": "Sensitive payroll file downloaded",
+          "risk_tags": ["download_volume_spike"],
+          "injected_label": "attack_account_takeover"
+        }
+      ]
+    },
+    {
+      "name": "data_exfiltration_database_file",
+      "type": "data_exfiltration",
+      "enabled": true,
+      "chains_per_window": 1,
+      "target_account_type": "employee",
+      "target_user_count": 1,
+      "steps": [
+        {
+          "source_type": "database",
+          "src_ip_mode": "usual",
+          "action": "export",
+          "log_type": "database_export",
+          "resource": "db://finance/payroll/export",
+          "object_type": "database",
+          "result": "success",
+          "severity": 8,
+          "message": "Large payroll export executed",
+          "risk_tags": ["download_volume_spike"],
+          "injected_label": "attack_data_exfiltration"
+        },
+        {
+          "source_type": "file",
+          "offset_seconds": 30,
+          "src_ip_mode": "usual",
+          "action": "download",
+          "log_type": "file_access",
+          "resource": "/exports/payroll.zip",
+          "object_type": "file",
+          "result": "success",
+          "severity": 8,
+          "message": "Export archive downloaded",
+          "risk_tags": ["sensitive_resource_access", "download_volume_spike"],
+          "injected_label": "attack_data_exfiltration"
+        }
+      ]
+    },
+    {
+      "name": "privilege_abuse_admin_api",
+      "type": "privilege_abuse",
+      "enabled": true,
+      "chains_per_window": 1,
+      "target_account_type": "employee",
+      "target_user_count": 1,
+      "steps": [
+        {
+          "source_type": "api",
+          "src_ip_mode": "usual",
+          "action": "api_call",
+          "log_type": "api_access",
+          "resource": "/api/admin/config",
+          "object_type": "api",
+          "result": "success",
+          "severity": 8,
+          "message": "Non-admin user accessed admin config API",
+          "risk_tags": ["admin_resource_access"],
+          "injected_label": "attack_privilege_abuse"
+        }
+      ]
+    },
+    {
+      "name": "service_account_anomaly",
+      "type": "service_account_anomaly",
+      "enabled": true,
+      "chains_per_window": 1,
+      "target_account_type": "service",
+      "target_user_count": 1,
+      "steps": [
+        {
+          "source_type": "api",
+          "src_ip_mode": "attacker",
+          "action": "api_call",
+          "log_type": "api_access",
+          "resource": "/api/internal/token/export",
+          "object_type": "api",
+          "result": "success",
+          "severity": 7,
+          "message": "Service account called sensitive API from unusual source",
+          "risk_tags": ["service_account_anomaly", "new_source_ip"],
+          "injected_label": "attack_service_account_anomaly"
+        }
+      ]
+    },
+    {
+      "name": "lateral_movement_system",
+      "type": "lateral_movement",
+      "enabled": true,
+      "chains_per_window": 1,
+      "target_account_type": "employee",
+      "target_user_count": 1,
+      "steps": [
+        {
+          "source_type": "system",
+          "repeat": 6,
+          "spacing_seconds": 8,
+          "src_ip_mode": "internal",
+          "action": "ssh_login",
+          "log_type": "system_login",
+          "resource": "host:internal-target",
+          "object_type": "host",
+          "result": "success",
+          "severity": 7,
+          "message": "Same source accessed multiple internal hosts",
+          "risk_tags": ["lateral_movement_signal"],
+          "injected_label": "attack_lateral_movement"
+        }
+      ]
+    }
+  ]
+}

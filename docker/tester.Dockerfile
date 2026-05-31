@@ -14,5 +14,8 @@ RUN pip install --no-cache-dir -r requirements/backend.txt -r requirements/test.
 COPY src src
 COPY tests tests
 COPY sql sql
+COPY scripts scripts
+COPY filebeat filebeat
+COPY log-generator log-generator
 
 CMD ["pytest", "-q"]

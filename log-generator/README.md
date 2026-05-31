@@ -1,12 +1,25 @@
-# VPN 登录日志生成器
+# 多源场景日志生成器
 
-模拟真实企业环境的 VPN 登录日志，包含 5W1H 要素和生成器用户先验，可用于安全分析、SIEM 规则测试、异常检测模型训练等场景。
+默认 Docker 运行使用配置化多源场景生成器，覆盖 VPN、OA、API、系统、文件、数据库和安全设备日志。旧的 `gen_vpn_logs.py` 仍保留为 VPN 单源本地调试脚本。
 
 ---
 
 ## 快速开始
 
-项目正式运行环境使用 Docker Compose。日常开发默认由 `log-generator` service 持续追加小规模日志到 `logs/vpn_logs.log`，再由 Filebeat 采集。
+项目正式运行环境使用 Docker Compose。日常开发默认由 `log-generator` service 持续追加小规模日志到多个文件，再由 Filebeat 多 input 采集。
+
+默认输出：
+
+```text
+logs/vpn.log
+logs/oa.log
+logs/api.log
+logs/system.log
+logs/file.log
+logs/database.log
+logs/security_device.log
+logs/manifest.jsonl
+```
 
 ```bash
 docker compose up --build
@@ -15,7 +28,11 @@ docker compose up --build
 以下命令仅作为生成器脚本的本地调试方式，不是项目正式运行要求：
 
 ```bash
-# 默认：生成 7 天，每天 50 条正常登录
+# 多源场景生成，一次性写入 logs/ 并生成 manifest
+python scenario_generator.py --outdir ../logs --manifest ../logs/manifest.jsonl \
+  --duration-minutes 10 --rate-per-minute 60 --seed 42
+
+# 旧 VPN 单源脚本：生成 7 天，每天 50 条正常登录
 python gen_vpn_logs.py
 
 # 自定义参数
@@ -29,6 +46,29 @@ python gen_vpn_logs.py --seed 123
 ```
 
 **依赖**：Python 3.10+ 标准库，无需额外安装。
+
+---
+
+## 配置化场景
+
+`scenarios/default.json` 通过组合以下要素生成流量，而不是为每个 case 写死一个函数：
+
+- `source_mix`：日志源比例。
+- `duration_minutes` / `rate_per_minute`：生成窗口和速率。
+- `anomaly_patterns`：异常模式。
+- `steps`：攻击链步骤。
+
+每条日志都会带全局唯一 `event_id`，并原样进入 parser、Kafka、ClickHouse。`manifest.jsonl` 使用同一个 `event_id` 做生成侧和 ClickHouse 侧对账。
+
+攻击链字段：
+
+- `scenario_id`
+- `scenario_type`
+- `attack_chain_id`
+- `step_index`
+- `injected_label`
+
+默认异常模式包含暴力破解、凭证填充、账号接管、数据窃取、权限滥用、服务账号异常和横向移动。
 
 ---
 

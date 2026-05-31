@@ -23,6 +23,22 @@ def test_parse_generator_json_line() -> None:
     assert out.risk_tags == []
 
 
+def test_preserves_upstream_event_id_and_source_type() -> None:
+    line = (
+        '{"event_id": "evt-fixed-1", "timestamp": "2026-04-01 09:40:16", '
+        '"tenant_id": "default", "source_type": "api", "log_type": "api_access", '
+        '"user_id": "svc.report", "src_ip": "10.10.1.8", "action": "api_call", '
+        '"resource": "/api/reports/export", "result": "success", "message": "api export"}'
+    )
+
+    out = normalize_raw_record(line, source_type_hint="vpn")
+
+    assert out.event_id == "evt-fixed-1"
+    assert out.source_type == "api"
+    assert out.log_type == "api_access"
+    assert out.action == "api_call"
+
+
 def test_parse_syslog_line() -> None:
     line = (
         '2026-04-01 09:40:16 vpn-gw-bj01 vpnd: event=LOGIN_FAIL user=admin dept=IT部 '

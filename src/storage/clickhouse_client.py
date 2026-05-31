@@ -6,7 +6,7 @@ from datetime import date, datetime
 from typing import Any
 
 from src.config import settings
-from src.schemas import AIFeedback, AIJudgement, AnomalyEvent, DailyReport, UserBaseline
+from src.schemas import AIFeedback, AIJudgement, AnomalyEvent, DailyReport, DataQualityMetric, UserBaseline
 
 
 LOG_COLUMNS: tuple[str, ...] = (
@@ -157,6 +157,29 @@ AI_FEEDBACK_COLUMNS: tuple[str, ...] = (
     "target_component",
     "confidence",
     "review_status",
+    "created_at",
+)
+
+DATA_QUALITY_COLUMNS: tuple[str, ...] = (
+    "metric_date",
+    "tenant_id",
+    "source_type",
+    "generated_count",
+    "injected_anomaly_count",
+    "injected_high_risk_count",
+    "raw_logs_count",
+    "parsed_logs_count",
+    "clickhouse_insert_count",
+    "security_logs_count",
+    "raw_size_bytes",
+    "table_size_bytes",
+    "compression_ratio",
+    "missing_event_time_rate",
+    "missing_user_id_rate",
+    "missing_src_ip_rate",
+    "missing_action_rate",
+    "missing_result_rate",
+    "parse_error_rate",
     "created_at",
 )
 
@@ -569,6 +592,71 @@ class ClickHouseStorage:
         payload = _daily_report_payload(_model_payload(report), tenant_id=tenant_id)
         row = _row_from_payload(payload, DAILY_REPORT_COLUMNS)
         self.client.insert("daily_security_reports", [row], column_names=list(DAILY_REPORT_COLUMNS))
+
+    def insert_data_quality_metrics(self, metrics: Sequence[DataQualityMetric | dict[str, Any]]) -> None:
+        rows = [
+            _row_from_payload(_model_payload(metric), DATA_QUALITY_COLUMNS)
+            for metric in metrics
+        ]
+        if rows:
+            self.client.insert("data_quality_metrics", rows, column_names=list(DATA_QUALITY_COLUMNS))
+
+    def security_log_quality_stats(self, event_ids: Sequence[str]) -> dict[str, Any]:
+        if not event_ids:
+            return {
+                "security_logs_count": 0,
+                "missing_event_time_count": 0,
+                "missing_user_id_count": 0,
+                "missing_src_ip_count": 0,
+                "missing_action_count": 0,
+                "missing_result_count": 0,
+                "parse_error_count": 0,
+            }
+        sql = """
+            SELECT
+                count() AS security_logs_count,
+                countIf(event_time IS NULL) AS missing_event_time_count,
+                countIf(user_id = '') AS missing_user_id_count,
+                countIf(src_ip = '') AS missing_src_ip_count,
+                countIf(action = '') AS missing_action_count,
+                countIf(result = '') AS missing_result_count,
+                countIf(log_type = 'parse_error' OR has(risk_tags, 'parse_error')) AS parse_error_count
+            FROM security_logs {final_clause}
+            WHERE event_id IN {{event_ids:Array(String)}}
+            """
+        try:
+            rows = self._select_dicts(
+                sql.format(final_clause="FINAL"),
+                {"event_ids": list(event_ids)},
+            )
+        except Exception:
+            rows = self._select_dicts(
+                sql.format(final_clause=""),
+                {"event_ids": list(event_ids)},
+            )
+        return rows[0] if rows else {
+            "security_logs_count": 0,
+            "missing_event_time_count": 0,
+            "missing_user_id_count": 0,
+            "missing_src_ip_count": 0,
+            "missing_action_count": 0,
+            "missing_result_count": 0,
+            "parse_error_count": 0,
+        }
+
+    def security_logs_table_size_bytes(self) -> int:
+        value = self._select_scalar(
+            """
+            SELECT sum(bytes_on_disk)
+            FROM system.parts
+            WHERE database = {database:String}
+              AND table = 'security_logs'
+              AND active
+            """,
+            {"database": settings.clickhouse_database},
+            default=0,
+        )
+        return int(value or 0)
 
     def insert_user_baselines(self, baselines: Sequence[UserBaseline | dict[str, Any]]) -> None:
         rows: list[list[Any]] = []
