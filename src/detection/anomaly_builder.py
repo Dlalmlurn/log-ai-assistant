@@ -74,6 +74,7 @@ REASON_ATTACK_TYPE_MAP = {
 ATTACK_TYPE_PRIORITY = (
     "data_exfiltration",
     "credential_stuffing",
+    "brute_force",
     "account_takeover",
     "privilege_abuse",
     "api_abuse",
@@ -99,6 +100,7 @@ class AnomalyEventBuilder:
         evidence: dict[str, Any] | None = None,
         related_event_ids: list[str] | None = None,
         baseline_deviations: list[dict[str, Any]] | None = None,
+        risk_component_overrides: dict[str, int] | None = None,
         attack_type: str | None = None,
         model_version: str = "rule-v1",
     ) -> AnomalyEvent:
@@ -119,6 +121,7 @@ class AnomalyEventBuilder:
         risk_components = _risk_components(
             normalized_reason_codes,
             normalized_baseline_deviations,
+            risk_component_overrides or {},
         )
         risk_score = _risk_score(risk_components)
         risk_level = _risk_level(risk_score)
@@ -167,6 +170,7 @@ def _now() -> datetime:
 def _risk_components(
     reason_codes: Iterable[str],
     baseline_deviations: list[dict[str, Any]],
+    risk_component_overrides: dict[str, int],
 ) -> dict[str, int]:
     """根据 reason_codes 和 baseline 偏离计算风险明细。"""
 
@@ -182,6 +186,9 @@ def _risk_components(
         default=0,
     )
     components["baseline_deviation"] = max(components["baseline_deviation"], baseline_score)
+    for key, score in risk_component_overrides.items():
+        if key in components:
+            components[key] = max(components[key], score)
     return components
 
 

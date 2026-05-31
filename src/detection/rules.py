@@ -109,6 +109,7 @@ class RuleEngine:
                         rule="同一src_ip在5分钟内登录失败超阈值",
                         reason_codes=["failed_login_spike"],
                         evidence={"src_ip": log.src_ip, "failed_count_5m": len(q)},
+                        risk_component_overrides={"rule_strength": 70},
                     )
                 )
 
@@ -275,6 +276,7 @@ class RuleEngine:
         reason_codes: list[str],
         evidence: dict,
         related_event_ids: list[str] | None = None,
+        risk_component_overrides: dict[str, int] | None = None,
     ) -> AnomalyEvent:
         """把规则命中信息交给 builder，生成标准异常事件。"""
 
@@ -284,6 +286,7 @@ class RuleEngine:
             reason_codes=reason_codes,
             evidence=evidence,
             related_event_ids=related_event_ids,
+            risk_component_overrides=risk_component_overrides,
         )
 
 

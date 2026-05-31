@@ -43,6 +43,14 @@ def test_bruteforce_ip_rule_triggered() -> None:
     assert any("failed_login_spike" in alert.reason_codes for alert in alerts)
     assert all("rule_score" not in alert.risk_components for alert in alerts)
     assert all("rule_strength" in alert.risk_components for alert in alerts)
+    ip_spike = next(
+        alert
+        for alert in alerts
+        if "同一src_ip在5分钟内登录失败超阈值" in alert.rule_hits
+    )
+    assert ip_spike.attack_type == "brute_force"
+    assert ip_spike.risk_level == "high"
+    assert ip_spike.ai_status == "pending"
 
 
 def test_new_ip_then_sensitive_access() -> None:
