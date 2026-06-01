@@ -1,5 +1,5 @@
 export type SourceType = "vpn" | "oa" | "api" | "system" | "file" | "database" | "security_device";
-export type RiskLevel = "low" | "medium" | "high" | "critical";
+export type RiskLevel = "low" | "medium" | "high";
 export type LogResult = "success" | "fail" | "denied" | "error";
 
 export type HealthResponse = {
@@ -7,6 +7,8 @@ export type HealthResponse = {
   flink: boolean;
   clickhouse: boolean;
   dashscope_configured: boolean;
+  deepseek_configured: boolean;
+  anomaly_detector_active: boolean;
   latest_log_ingest_time: string | null;
   consumer_lag: Record<string, number>;
 };

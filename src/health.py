@@ -9,6 +9,7 @@ from src.config import settings
 CONSUMER_GROUP_TOPICS: dict[str, list[str]] = {
     "flink-raw-to-parsed": [settings.kafka_raw_topic],
     "clickhouse-parsed-logs": [settings.kafka_parsed_topic],
+    "anomaly-detector": [settings.kafka_parsed_topic],
 }
 
 
@@ -17,6 +18,8 @@ class HealthResponse(BaseModel):
     flink: bool
     clickhouse: bool
     dashscope_configured: bool
+    deepseek_configured: bool = False
+    anomaly_detector_active: bool = False
     latest_log_ingest_time: str | None = None
     consumer_lag: dict[str, int] = Field(default_factory=dict)
 
@@ -25,12 +28,15 @@ def get_health_status() -> HealthResponse:
     """REQ-001/REQ-002/REQ-007: expose formal pipeline health to the API layer."""
     kafka_ok = _check_kafka()
     clickhouse_ok, latest_log_ingest_time = _check_clickhouse()
+    anomaly_ok = _check_anomaly_detector(clickhouse_ok)
 
     return HealthResponse(
         kafka=kafka_ok,
         flink=_check_flink(),
         clickhouse=clickhouse_ok,
         dashscope_configured=bool(settings.dashscope_api_key),
+        deepseek_configured=bool(settings.deepseek_api_key),
+        anomaly_detector_active=anomaly_ok,
         latest_log_ingest_time=latest_log_ingest_time,
         consumer_lag=_get_consumer_lag() if kafka_ok else _empty_consumer_lag(),
     )
@@ -44,6 +50,8 @@ def get_cli_health_payload() -> dict[str, object]:
         "clickhouse": status.clickhouse,
         "flink": status.flink,
         "dashscope_configured": status.dashscope_configured,
+        "deepseek_configured": status.deepseek_configured,
+        "anomaly_detector_active": status.anomaly_detector_active,
         "last_data_update": status.latest_log_ingest_time or "N/A",
     }
 
@@ -86,6 +94,19 @@ def _check_flink() -> bool:
     try:
         resp = requests.get(f"{settings.flink_dashboard_url}/overview", timeout=3)
         return resp.ok
+    except Exception:
+        return False
+
+
+def _check_anomaly_detector(clickhouse_ok: bool) -> bool:
+    if not clickhouse_ok:
+        return False
+    try:
+        from src.storage import ClickHouseStorage
+
+        storage = ClickHouseStorage()
+        anomalies, _ = storage.list_anomalies(limit=1, offset=0)
+        return len(anomalies) > 0
     except Exception:
         return False
 

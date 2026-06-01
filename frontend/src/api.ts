@@ -100,6 +100,40 @@ export async function createDailyReport(
   });
 }
 
+export type AccuracyTestResult = {
+  seed: number;
+  days: number;
+  count_per_day: number;
+  logs_generated: number;
+  logs_sent: number;
+  anomalies_found: number;
+  precision: number;
+  recall: number;
+  f1: number;
+  tp: number;
+  fp: number;
+  fn: number;
+  tn: number;
+  by_dimension: Record<string, { precision: number; recall: number; f1: number; tp: number; fp: number; fn: number }>;
+  warnings: string[];
+};
+
+export async function runAccuracyTest(
+  seed?: number,
+  days?: number,
+  count?: number,
+  signal?: AbortSignal,
+): Promise<AccuracyTestResult> {
+  const params = new URLSearchParams();
+  if (seed !== undefined) params.set("seed", String(seed));
+  if (days !== undefined) params.set("days", String(days));
+  if (count !== undefined) params.set("count", String(count));
+  return apiFetch<AccuracyTestResult>(`/api/v1/test/accuracy?${params.toString()}`, {
+    method: "POST",
+    signal,
+  });
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
