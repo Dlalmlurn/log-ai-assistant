@@ -141,12 +141,17 @@ services:
       FLINK_DASHBOARD_URL: ${FLINK_DASHBOARD_URL_DOCKER:-http://flink-jobmanager:8081}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY_DOCKER:-}
       DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-qwen-plus}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:5173}
     ports:
       - "${FASTAPI_HOST_PORT:-8000}:8000"
     volumes:
       - ./src:/app/src:ro
       - ./logs:/var/log/app:ro
+      - ./log-generator:/app/log-generator:ro
+      - ./tests:/app/tests:ro
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -191,6 +196,7 @@ services:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
     container_name: log-generator
     environment:
+      TZ: ${TZ:-Asia/Shanghai}
       LOG_GENERATOR_OUTPUT_DIR: ${LOG_GENERATOR_OUTPUT_DIR:-/var/log/app}
       LOG_GENERATOR_MANIFEST: ${LOG_GENERATOR_MANIFEST:-/var/log/app/manifest.jsonl}
       LOG_GENERATOR_CONFIG: ${LOG_GENERATOR_CONFIG:-/app/log-generator/scenarios/default.json}
@@ -209,6 +215,7 @@ services:
     container_name: log-generator-scale
     profiles: ["scale"]
     environment:
+      TZ: ${TZ:-Asia/Shanghai}
       LOG_GENERATOR_OUTPUT_DIR: ${LOG_GENERATOR_OUTPUT_DIR:-/var/log/app}
       LOG_GENERATOR_MANIFEST: ${LOG_GENERATOR_MANIFEST:-/var/log/app/manifest.jsonl}
       LOG_GENERATOR_CONFIG: ${LOG_GENERATOR_CONFIG:-/app/log-generator/scenarios/default.json}
@@ -221,17 +228,19 @@ services:
   flink-submit:
     image: log-ai-assistant-flink-python
     container_name: flink-submit
-    profiles: ["jobs"]
+    restart: unless-stopped
     working_dir: /opt/app
     environment:
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS_DOCKER:-kafka:9092}
       KAFKA_RAW_TOPIC: ${KAFKA_RAW_TOPIC:-raw_logs}
       KAFKA_PARSED_TOPIC: ${KAFKA_PARSED_TOPIC:-parsed_logs}
       PYTHONPATH: /opt/app
+      FLINK_DASHBOARD_URL: ${FLINK_DASHBOARD_URL_DOCKER:-http://flink-jobmanager:8081}
     volumes:
       - ./flink_jobs:/opt/app/flink_jobs:ro
       - ./src:/opt/app/src:ro
       - ./requirements:/opt/app/requirements:ro
+      - ./scripts/flink_job_daemon.sh:/opt/app/flink_job_daemon.sh:ro
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -239,15 +248,41 @@ services:
         condition: service_healthy
       flink-taskmanager:
         condition: service_started
-    command:
-      - bash
-      - -lc
-      - |
-        flink run -m flink-jobmanager:8081 -py /opt/app/flink_jobs/raw_to_parsed.py \
-          --pyFiles /opt/app \
-          --bootstrap-servers "$$KAFKA_BOOTSTRAP_SERVERS" \
-          --raw-topic "$$KAFKA_RAW_TOPIC" \
-          --parsed-topic "$$KAFKA_PARSED_TOPIC"
+    command: ["bash", "/opt/app/flink_job_daemon.sh"]
+
+  anomaly-detector:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
+    container_name: log-ai-anomaly-detector
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS_DOCKER:-kafka:9092}
+      KAFKA_PARSED_TOPIC: ${KAFKA_PARSED_TOPIC:-parsed_logs}
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse}
+      CLICKHOUSE_HTTP_PORT: ${CLICKHOUSE_HTTP_PORT:-8123}
+      CLICKHOUSE_NATIVE_PORT: ${CLICKHOUSE_NATIVE_PORT:-9000}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-log_ai}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-qwen-plus}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+    volumes:
+      - ./src:/app/src:ro
+      - ./flink_jobs:/app/flink_jobs:ro
+      - ./log-generator:/app/log-generator:ro
+      - ./tests:/app/tests:ro
+    command: ["python", "-m", "flink_jobs.realtime_rules"]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
 
   tester:
     build:

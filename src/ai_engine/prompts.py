@@ -19,7 +19,7 @@ def build_anomaly_judgement_prompt(
     return (
         "你是企业安全分析助手。你必须基于输入的结构化上下文输出严格 JSON，不能输出额外文本。\n"
         "输出字段必须包含: attack_type, risk_level, judgement, key_reasons, recommended_actions, confidence。\n"
-        "risk_level 只能是: low, medium, high, critical。confidence 是 0-1 浮点数。\n"
+        "risk_level 只能是: low, medium, high。confidence 是 0-1 浮点数。\n"
         "输入上下文如下:\n"
-        f"{json.dumps(payload, ensure_ascii=False)}"
+        f"{json.dumps(payload, ensure_ascii=False, default=str)}"
     )

@@ -46,6 +46,10 @@ class Settings:
     dashscope_api_key: str
     dashscope_model: str
 
+    deepseek_api_key: str
+    deepseek_model: str
+    deepseek_base_url: str
+
     backend_cors_origins: list[str]
 
     generator_script: Path
@@ -78,6 +82,9 @@ settings = Settings(
     flink_dashboard_url=os.getenv("FLINK_DASHBOARD_URL", "http://localhost:8081"),
     dashscope_api_key=os.getenv("DASHSCOPE_API_KEY", ""),
     dashscope_model=os.getenv("DASHSCOPE_MODEL", "qwen-plus"),
+    deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+    deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+    deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
     backend_cors_origins=_get_csv("BACKEND_CORS_ORIGINS", "http://localhost:5173"),
     generator_script=(PROJECT_ROOT / os.getenv("GENERATOR_SCRIPT", "log-generator/gen_vpn_logs.py")).resolve(),
     generator_jsonl=(PROJECT_ROOT / os.getenv("GENERATOR_JSONL", "log-generator/vpn_output/vpn_logs.jsonl")).resolve(),

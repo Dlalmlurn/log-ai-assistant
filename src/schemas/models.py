@@ -6,7 +6,7 @@ from typing import Any, Generic, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, Field
 
 
-RiskLevel = Literal["low", "medium", "high", "critical"]
+RiskLevel = Literal["low", "medium", "high"]
 SourceType = Literal["vpn", "oa", "api", "system", "file", "database", "security_device"]
 LogResult = Literal["success", "fail", "denied", "error"]
 AIStatus = Literal["not_required", "pending", "analyzed", "failed"]

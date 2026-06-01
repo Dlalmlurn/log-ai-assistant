@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -36,6 +36,7 @@ from src.schemas import (
 )
 from src.storage import ClickHouseStorage
 from src.ueba import build_and_store_baselines
+from src.ueba.baseline import aggregate_daily_features, update_seen_sources
 
 
 ERROR_RESPONSE_SCHEMA = {
@@ -441,12 +442,36 @@ def list_baselines(
     responses=STANDARD_ERROR_RESPONSES,
     tags=["baselines"],
     summary="Rebuild user behavior baselines",
-    description="REQ-003: rebuild user behavior baselines from stored security logs.",
+    description="REQ-003: rebuild user behavior baselines from all stored security logs.",
 )
 def rebuild_baselines(
     storage: ClickHouseStorage = Depends(get_storage),
 ) -> BaselineRebuildResponse:
+    """Backfill daily features for all dates with logs, then rebuild baselines from ALL data."""
     try:
+        # 1. Find the date range that has logs but may not have features yet
+        from datetime import date as _date
+        today = _date.today()
+        first_log = storage._select_scalar(
+            "SELECT min(event_time::Date) FROM security_logs WHERE tenant_id = {t:String}",
+            parameters={"t": "default"},
+            default=today,
+        )
+        if first_log is None:
+            first_log = today
+
+        # 2. Aggregate daily features for every day that has logs (backfill)
+        agg_dates = 0
+        d = first_log if isinstance(first_log, _date) else first_log
+        while d <= today:
+            aggregate_daily_features(storage, target_date=datetime.combine(d, datetime.min.time(), tzinfo=timezone.utc))
+            agg_dates += 1
+            d += timedelta(days=1)
+
+        # 3. Update seen sources for the full range
+        update_seen_sources(storage)
+
+        # 4. Build baselines from ALL available daily features (90-day window)
         baselines = build_and_store_baselines(storage)
     except Exception as exc:
         raise HTTPException(
@@ -849,3 +874,37 @@ def _numeric(value: Any) -> float | None:
         return float(str(value))
     except ValueError:
         return None
+
+
+# -- accuracy test endpoint ----------------------------------------------------
+
+
+@app.post(
+    "/api/v1/test/accuracy",
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["test"],
+    summary="Run UEBA accuracy test",
+    description="Generate deterministic logs, run anomaly detection, and evaluate UEBA baseline scoring accuracy.",
+)
+def run_accuracy_test_endpoint(
+    seed: int = Query(default=42, description="Random seed for reproducible generation"),
+    days: int = Query(default=3, ge=1, le=10, description="Days of logs to generate"),
+    count: int = Query(default=100, ge=50, le=500, description="Normal logins per day"),
+) -> dict[str, Any]:
+    try:
+        from tests.accuracy.run_test import run_accuracy_test as _run_test
+
+        return _run_test(
+            seed=seed,
+            days=days,
+            count=count,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "accuracy_test_failed",
+                "message": f"Accuracy test failed: {exc}",
+                "details": {},
+            },
+        ) from exc
