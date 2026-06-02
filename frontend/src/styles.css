@@ -226,6 +226,14 @@ p {
   flex: 0 0 auto;
 }
 
+.success-banner {
+  padding: 12px 14px;
+  border: 1px solid #9bd8b4;
+  border-radius: 8px;
+  color: #0d5f3d;
+  background: #ecfbf1;
+}
+
 .status-summary {
   display: flex;
   align-items: center;
@@ -827,6 +835,112 @@ p {
   overflow-wrap: anywhere;
 }
 
+.inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.compact-metrics {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.compact-list,
+.profile-grid,
+.report-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.profile-grid {
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+}
+
+.profile-card,
+.judgement-card,
+.report-card,
+.compact-row {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--border, #d6e0e8);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: var(--shadow-sm, 0 1px 2px rgb(17 31 43 / 7%));
+}
+
+.profile-card-head,
+.compact-row {
+  align-items: start;
+}
+
+.profile-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.profile-card-head h2 {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  font-size: 20px;
+}
+
+.profile-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.profile-meta span {
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: #526575;
+  background: #eef4f6;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.profile-sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.profile-sections section {
+  min-width: 0;
+}
+
+.profile-sections h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.compact-row {
+  grid-template-columns: minmax(180px, 1fr) minmax(220px, 2fr);
+  align-items: center;
+}
+
+.compact-row strong,
+.compact-row span {
+  display: block;
+}
+
+.compact-row > div:first-child span {
+  margin-top: 4px;
+  color: var(--ink-soft, #607286);
+  font-size: 12px;
+}
+
+.date-input {
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong, #b7c9d4);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
 .json-block {
   max-height: 260px;
   overflow: auto;
@@ -1323,7 +1437,7 @@ body {
 
   .nav {
     display: grid;
-    grid-template-columns: repeat(3, minmax(96px, 1fr));
+    grid-template-columns: repeat(2, minmax(124px, 1fr));
     min-width: 100%;
   }
 
@@ -1348,6 +1462,11 @@ body {
   .detail-panel-header {
     margin: -12px -12px 0;
     padding: 12px;
+  }
+
+  .profile-grid,
+  .compact-row {
+    grid-template-columns: 1fr;
   }
 }
 

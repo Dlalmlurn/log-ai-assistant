@@ -8,8 +8,8 @@ REPLICATION_FACTOR="${KAFKA_TOPIC_REPLICATION_FACTOR:-1}"
 TOPICS=(
   "${KAFKA_RAW_TOPIC:-raw_logs}"
   "${KAFKA_PARSED_TOPIC:-parsed_logs}"
-  "${KAFKA_ALERT_TOPIC:-alert_events}"
-  "${KAFKA_AI_TOPIC:-ai_reports}"
+  "${KAFKA_ANOMALY_TOPIC:-${KAFKA_ALERT_TOPIC:-anomaly_events}}"
+  "${KAFKA_AI_JUDGEMENT_TOPIC:-${KAFKA_AI_TOPIC:-ai_judgements}}"
   "${KAFKA_METRICS_TOPIC:-system_metrics}"
 )
 

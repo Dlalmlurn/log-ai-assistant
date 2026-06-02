@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import uuid
+from datetime import date as Date, datetime, timedelta, timezone
+from threading import Lock
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -15,6 +17,7 @@ from src.config import settings
 from src.health import HealthResponse, get_health_status
 from src.report.daily_report import generate_daily_report
 from src.schemas import (
+    AIFeedback,
     AIJudgement,
     AIJudgementListResponse,
     AnomalyDetailResponse,
@@ -25,14 +28,17 @@ from src.schemas import (
     DailyReportListResponse,
     ErrorResponse,
     EvidenceChain,
+    FeedbackCreateRequest,
     LogAggregateRequest,
     LogAggregateResponse,
     NormalizedLog,
     NormalizedLogListResponse,
     RiskLevel,
     SourceType,
+    StatsOverviewResponse,
     UserBaseline,
     UserBaselineListResponse,
+    UserRiskStatsListResponse,
 )
 from src.storage import ClickHouseStorage
 from src.ueba import build_and_store_baselines
@@ -58,6 +64,8 @@ HTTP_ERROR_CODES = {
     422: "validation_error",
     500: "internal_error",
 }
+_daily_report_locks_guard = Lock()
+_daily_report_locks: dict[tuple[str, str], Lock] = {}
 
 
 app = FastAPI(
@@ -449,29 +457,26 @@ def rebuild_baselines(
 ) -> BaselineRebuildResponse:
     """Backfill daily features for all dates with logs, then rebuild baselines from ALL data."""
     try:
-        # 1. Find the date range that has logs but may not have features yet
-        from datetime import date as _date
-        today = _date.today()
-        first_log = storage._select_scalar(
-            "SELECT min(event_time::Date) FROM security_logs WHERE tenant_id = {t:String}",
-            parameters={"t": "default"},
-            default=today,
-        )
-        if first_log is None:
-            first_log = today
+        if hasattr(storage, "_select_scalar"):
+            today = datetime.now(timezone.utc).date()
+            first_log = storage._select_scalar(
+                "SELECT min(toDate(event_time)) FROM security_logs WHERE tenant_id = {t:String}",
+                parameters={"t": "default"},
+                default=today,
+            )
+            if first_log is None:
+                first_log = today
 
-        # 2. Aggregate daily features for every day that has logs (backfill)
-        agg_dates = 0
-        d = first_log if isinstance(first_log, _date) else first_log
-        while d <= today:
-            aggregate_daily_features(storage, target_date=datetime.combine(d, datetime.min.time(), tzinfo=timezone.utc))
-            agg_dates += 1
-            d += timedelta(days=1)
+            current_day = first_log if isinstance(first_log, Date) else Date.fromisoformat(str(first_log))
+            while current_day <= today:
+                aggregate_daily_features(
+                    storage,
+                    target_date=datetime.combine(current_day, datetime.min.time(), tzinfo=timezone.utc),
+                )
+                current_day += timedelta(days=1)
 
-        # 3. Update seen sources for the full range
-        update_seen_sources(storage)
+            update_seen_sources(storage)
 
-        # 4. Build baselines from ALL available daily features (90-day window)
         baselines = build_and_store_baselines(storage)
     except Exception as exc:
         raise HTTPException(
@@ -562,6 +567,45 @@ def list_ai_reports(
     )
 
 
+@app.post(
+    "/api/v1/feedback",
+    response_model=AIFeedback,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["feedback"],
+    summary="Submit AI or analyst feedback",
+    description="REQ-004: write AI or analyst feedback into ai_feedback for later review.",
+)
+def create_feedback(
+    request: FeedbackCreateRequest,
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> AIFeedback:
+    feedback = AIFeedback(
+        feedback_id=f"fb-{uuid.uuid4()}",
+        event_id=request.event_id,
+        judgement_id=request.judgement_id,
+        tenant_id=request.tenant_id,
+        user_id=request.user_id,
+        feedback_type=request.feedback_type,
+        suggestion=request.suggestion,
+        target_component=request.target_component,
+        confidence=request.confidence,
+        review_status="pending",
+        created_at=datetime.now(timezone.utc),
+    )
+    try:
+        storage.insert_feedback(feedback)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "feedback_write_failed",
+                "message": "Failed to write AI feedback into ClickHouse",
+                "details": {"table": "ai_feedback", "event_id": request.event_id},
+            },
+        ) from exc
+    return feedback
+
+
 @app.get(
     "/api/v1/reports/daily",
     response_model=DailyReportListResponse,
@@ -614,8 +658,21 @@ def create_daily_report(
     storage: ClickHouseStorage = Depends(get_storage),
 ) -> DailyReport:
     try:
-        report = generate_daily_report(storage, date_str=date)
-        storage.insert_daily_report(report, tenant_id=tenant_id)
+        report_day = _resolve_daily_report_date(date)
+        lock = _daily_report_lock(tenant_id, report_day.isoformat())
+        with lock:
+            existing, _total = storage.list_daily_reports(
+                tenant_id=tenant_id,
+                start_date=report_day,
+                end_date=report_day,
+                limit=1,
+                offset=0,
+            )
+            if existing:
+                return DailyReport(**existing[0])
+
+            report = generate_daily_report(storage, date_str=report_day.isoformat())
+            storage.insert_daily_report(report, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
@@ -636,6 +693,74 @@ def create_daily_report(
         ) from exc
 
     return report
+
+
+@app.get(
+    "/api/v1/stats/overview",
+    response_model=StatsOverviewResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["stats"],
+    summary="Get workbench overview statistics",
+    description="REQ-006: query ClickHouse-backed counters for the workbench overview.",
+)
+def get_stats_overview(
+    tenant_id: str | None = Query(default=None),
+    start_time: datetime | None = Query(default=None),
+    end_time: datetime | None = Query(default=None),
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> StatsOverviewResponse:
+    try:
+        stats = storage.get_stats_overview(
+            tenant_id=tenant_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "clickhouse_query_failed",
+                "message": "Failed to query overview statistics from ClickHouse",
+                "details": {"tables": ["security_logs", "anomaly_events"]},
+            },
+        ) from exc
+    return StatsOverviewResponse(**stats)
+
+
+@app.get(
+    "/api/v1/stats/users/risk",
+    response_model=UserRiskStatsListResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["stats"],
+    summary="Get user risk ranking",
+    description="REQ-003, REQ-006: rank users by anomaly-derived risk, with room for baseline enrichment later.",
+)
+def list_user_risk_stats(
+    tenant_id: str | None = Query(default=None),
+    start_time: datetime | None = Query(default=None),
+    end_time: datetime | None = Query(default=None),
+    limit: int = Query(default=20, ge=1),
+    offset: int = Query(default=0, ge=0),
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> UserRiskStatsListResponse:
+    try:
+        items, total = storage.list_user_risk_stats(
+            tenant_id=tenant_id,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            offset=offset,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "clickhouse_query_failed",
+                "message": "Failed to query user risk statistics from ClickHouse",
+                "details": {"table": "anomaly_events"},
+            },
+        ) from exc
+    return UserRiskStatsListResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -688,6 +813,20 @@ def _build_error_response(
         message=message,
         details=details or {},
     )
+
+
+def _resolve_daily_report_date(date_str: str | None) -> Date:
+    if date_str is None:
+        return datetime.now(timezone.utc).date()
+    return datetime.strptime(date_str, "%Y-%m-%d").date()
+
+
+def _daily_report_lock(tenant_id: str, report_date: str) -> Lock:
+    key = (tenant_id, report_date)
+    with _daily_report_locks_guard:
+        if key not in _daily_report_locks:
+            _daily_report_locks[key] = Lock()
+        return _daily_report_locks[key]
 
 
 def _fetch_alert_baseline(storage: ClickHouseStorage, alert: dict[str, Any]) -> dict[str, Any]:

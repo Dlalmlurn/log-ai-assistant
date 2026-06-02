@@ -16,6 +16,7 @@ from .models import (
     FallbackLevel,
     FeedbackTargetComponent,
     FeedbackType,
+    FeedbackCreateRequest,
     ListResponse,
     LogResult,
     LogAggregateRequest,
@@ -27,9 +28,12 @@ from .models import (
     ReviewStatus,
     RiskLevel,
     SourceType,
+    StatsOverviewResponse,
     UserBaseline,
     UserBaselineListResponse,
     UserDailyFeature,
+    UserRiskStats,
+    UserRiskStatsListResponse,
 )
 
 __all__ = [
@@ -50,6 +54,7 @@ __all__ = [
     "FallbackLevel",
     "FeedbackTargetComponent",
     "FeedbackType",
+    "FeedbackCreateRequest",
     "ListResponse",
     "LogResult",
     "LogAggregateRequest",
@@ -61,7 +66,10 @@ __all__ = [
     "ReviewStatus",
     "RiskLevel",
     "SourceType",
+    "StatsOverviewResponse",
     "UserBaseline",
     "UserBaselineListResponse",
     "UserDailyFeature",
+    "UserRiskStats",
+    "UserRiskStatsListResponse",
 ]

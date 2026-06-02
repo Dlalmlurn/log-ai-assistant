@@ -528,6 +528,55 @@ class ClickHouseStorage:
             parameters,
         )
 
+    def list_user_risk_stats(
+        self,
+        *,
+        tenant_id: str | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        filters, parameters = _build_anomaly_filters(
+            tenant_id=tenant_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        filters.append("user_id != ''")
+        where_sql = _where(filters)
+        parameters |= _pagination_parameters(limit=limit, offset=offset)
+        rows = self._select_dicts(
+            f"""
+            SELECT
+                user_id,
+                count() AS anomaly_count,
+                countIf(risk_level IN ('high', 'critical')) AS high_risk_count,
+                countIf(risk_level = 'critical') AS critical_count,
+                max(risk_score) AS max_risk_score,
+                max(event_time) AS latest_event_time
+            FROM anomaly_events
+            {where_sql}
+            GROUP BY user_id
+            ORDER BY high_risk_count DESC, max_risk_score DESC, anomaly_count DESC, latest_event_time DESC
+            LIMIT {{limit:UInt64}} OFFSET {{offset:UInt64}}
+            """,
+            parameters,
+        )
+        total = self._select_scalar(
+            f"""
+            SELECT count()
+            FROM (
+                SELECT user_id
+                FROM anomaly_events
+                {where_sql}
+                GROUP BY user_id
+            )
+            """,
+            parameters,
+            default=0,
+        )
+        return rows, int(total or 0)
+
     def list_user_baselines(
         self,
         *,
@@ -544,22 +593,21 @@ class ClickHouseStorage:
         )
         where_sql = _where(filters)
         parameters |= _pagination_parameters(limit=limit, offset=offset)
-        # Pick the latest baseline per (tenant_id, user_id) — each user has exactly one active baseline
+        # Pick the latest baseline per (tenant_id, user_id); each user has one active baseline.
         rows = self._select_dicts(
             f"""
-            WITH latest_per_user AS (
-                SELECT tenant_id, user_id, max(baseline_date) AS baseline_date
-                FROM ueba_user_baseline
-                {where_sql}
-                GROUP BY tenant_id, user_id
-                ORDER BY user_id ASC
-                LIMIT {{limit:UInt64}} OFFSET {{offset:UInt64}}
-            ),
-            baseline_keys AS (
+            WITH baseline_keys AS (
                 SELECT DISTINCT b.tenant_id, b.user_id, b.baseline_date,
                        b.model_version, b.trained_from, b.trained_to
                 FROM ueba_user_baseline AS b
-                INNER JOIN latest_per_user AS l
+                INNER JOIN (
+                    SELECT tenant_id, user_id, max(baseline_date) AS baseline_date
+                    FROM ueba_user_baseline
+                    {where_sql}
+                    GROUP BY tenant_id, user_id
+                    ORDER BY user_id ASC
+                    LIMIT {{limit:UInt64}} OFFSET {{offset:UInt64}}
+                ) AS l
                     ON b.tenant_id = l.tenant_id
                    AND b.user_id = l.user_id
                    AND b.baseline_date = l.baseline_date

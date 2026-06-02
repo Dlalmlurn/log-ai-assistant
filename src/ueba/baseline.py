@@ -204,9 +204,9 @@ def update_seen_sources(
         if not uid:
             continue
 
-        keys: list[tuple[str, str, str, str]] = [
-            ("default", uid, "src_ip", src_ip) if src_ip else None,
-            ("default", uid, "dst_ip", dst_ip) if dst_ip else None,
+        keys: list[tuple[str, str, str, str] | None] = [
+            ("default", uid, "ip", src_ip) if src_ip else None,
+            ("default", uid, "host", dst_ip) if dst_ip else None,
         ]
 
         for key in filter(None, keys):

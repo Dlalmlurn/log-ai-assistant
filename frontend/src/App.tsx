@@ -3,9 +3,12 @@ import type { ReactNode } from "react";
 import {
   Activity,
   AlertCircle,
+  BarChart3,
+  Brain,
   CheckCircle2,
   Clock3,
   Database,
+  FileText,
   Filter,
   ListFilter,
   Pause,
@@ -17,22 +20,42 @@ import {
   ShieldCheck,
   Sparkles,
   TerminalSquare,
+  UserRound,
   XCircle
 } from "lucide-react";
 
-import { ApiRequestError, fetchAlertDetail, fetchAlerts, fetchHealth, fetchLogs } from "./api";
+import {
+  analyzeAlert,
+  ApiRequestError,
+  createDailyReport,
+  createFeedback,
+  fetchAIReports,
+  fetchAlertDetail,
+  fetchAlerts,
+  fetchBaselines,
+  fetchDailyReports,
+  fetchHealth,
+  fetchLogs,
+  fetchStatsOverview,
+  fetchUserRiskStats
+} from "./api";
 import type {
+  AIJudgement,
   AnomalyDetailResponse,
   AnomalyEvent,
   AlertsQuery,
+  DailyReport,
   HealthResponse,
   LogsQuery,
   NormalizedLog,
+  StatsOverview,
+  UserBaseline,
+  UserRiskStats,
   RiskLevel,
   SourceType
 } from "./types";
 
-type PageKey = "logs" | "alerts" | "status";
+type PageKey = "logs" | "anomalies" | "users" | "ai" | "reports" | "status";
 
 type LoadState<T> = {
   data: T | null;
@@ -103,9 +126,21 @@ function App() {
             <TerminalSquare aria-hidden="true" />
             Realtime Logs
           </button>
-          <button className={page === "alerts" ? "active" : ""} type="button" onClick={() => setPage("alerts")}>
+          <button className={page === "anomalies" ? "active" : ""} type="button" onClick={() => setPage("anomalies")}>
             <AlertCircle aria-hidden="true" />
-            Alerts
+            Anomalies
+          </button>
+          <button className={page === "users" ? "active" : ""} type="button" onClick={() => setPage("users")}>
+            <UserRound aria-hidden="true" />
+            User Profiles
+          </button>
+          <button className={page === "ai" ? "active" : ""} type="button" onClick={() => setPage("ai")}>
+            <Brain aria-hidden="true" />
+            AI Judgement
+          </button>
+          <button className={page === "reports" ? "active" : ""} type="button" onClick={() => setPage("reports")}>
+            <FileText aria-hidden="true" />
+            Daily Reports
           </button>
           <button className={page === "status" ? "active" : ""} type="button" onClick={() => setPage("status")}>
             <Activity aria-hidden="true" />
@@ -125,7 +160,10 @@ function App() {
 
       <main className="workspace">
         {page === "logs" ? <RealtimeLogsPage /> : null}
-        {page === "alerts" ? <AlertsPage /> : null}
+        {page === "anomalies" ? <AlertsPage /> : null}
+        {page === "users" ? <UserProfilesPage /> : null}
+        {page === "ai" ? <AIJudgementPage /> : null}
+        {page === "reports" ? <DailyReportsPage /> : null}
         {page === "status" ? <SystemStatusPage /> : null}
       </main>
     </div>
@@ -134,6 +172,18 @@ function App() {
 
 function SystemStatusPage() {
   const [state, setState] = useState<LoadState<HealthResponse>>({
+    data: null,
+    loading: true,
+    error: null,
+    updatedAt: null
+  });
+  const [statsState, setStatsState] = useState<LoadState<StatsOverview>>({
+    data: null,
+    loading: true,
+    error: null,
+    updatedAt: null
+  });
+  const [riskState, setRiskState] = useState<LoadState<{ items: UserRiskStats[]; total: number }>>({
     data: null,
     loading: true,
     error: null,
@@ -158,16 +208,41 @@ function SystemStatusPage() {
       });
   }, []);
 
+  const loadStats = useCallback((signal?: AbortSignal) => {
+    setStatsState((current) => ({ ...current, loading: true, error: null }));
+    setRiskState((current) => ({ ...current, loading: true, error: null }));
+    fetchStatsOverview({}, signal)
+      .then((data) => setStatsState({ data, loading: false, error: null, updatedAt: new Date() }))
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        setStatsState((current) => ({ ...current, loading: false, error: formatError(error) }));
+      });
+    fetchUserRiskStats({ limit: 5, offset: 0 }, signal)
+      .then((data) => setRiskState({ data: { items: data.items, total: data.total }, loading: false, error: null, updatedAt: new Date() }))
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        setRiskState((current) => ({ ...current, loading: false, error: formatError(error) }));
+      });
+  }, []);
+
   useEffect(() => {
     const controller = new AbortController();
     load(controller.signal);
-    const interval = window.setInterval(() => load(), 15000);
+    loadStats(controller.signal);
+    const interval = window.setInterval(() => {
+      load();
+      loadStats();
+    }, 15000);
 
     return () => {
       controller.abort();
       window.clearInterval(interval);
     };
-  }, [load]);
+  }, [load, loadStats]);
 
   const services = useMemo(() => {
     const health = state.data;
@@ -175,7 +250,7 @@ function SystemStatusPage() {
       {
         name: "Kafka",
         ok: health?.kafka ?? false,
-        description: "raw_logs, parsed_logs and alert_events transport",
+        description: "raw_logs, parsed_logs and anomaly transport",
         icon: RadioTower
       },
       {
@@ -241,17 +316,41 @@ function SystemStatusPage() {
           hint="Most recent security_logs ingest_time"
         />
         <Metric
-          icon={ListFilter}
-          label="Consumer groups"
-          value={String(Object.keys(state.data?.consumer_lag ?? {}).length)}
-          hint="Tracked Kafka lag groups"
+          icon={BarChart3}
+          label="Anomalies"
+          value={formatNumber(statsState.data?.anomaly_count)}
+          hint={`${formatNumber(statsState.data?.high_risk_count)} high or critical`}
         />
         <Metric
           icon={Server}
-          label="Last refreshed"
-          value={state.updatedAt ? state.updatedAt.toLocaleTimeString() : "Waiting"}
-          hint="Health page refresh cadence is 15 seconds"
+          label="Log volume"
+          value={formatNumber(statsState.data?.log_count)}
+          hint={`Latest ${formatDateTime(statsState.data?.latest_log_ingest_time)}`}
         />
+      </div>
+
+      {statsState.error ? <ErrorBanner message={statsState.error} /> : null}
+
+      <div className="section-title">
+        <h2>User Risk Ranking</h2>
+        <span>Top users from /api/v1/stats/users/risk</span>
+      </div>
+      <div className="compact-list">
+        {riskState.data?.items.map((item) => (
+          <article key={item.user_id} className="compact-row">
+            <div>
+              <strong>{item.user_id}</strong>
+              <span>{formatDateTime(item.latest_event_time)}</span>
+            </div>
+            <div className="tag-list">
+              <span>{item.anomaly_count} anomalies</span>
+              <span>{item.high_risk_count} high+</span>
+              <span>max {item.max_risk_score}</span>
+            </div>
+          </article>
+        ))}
+        {!riskState.loading && riskState.data?.items.length === 0 ? <EmptyState title="No ranked users" detail="User risk ranking is empty until anomaly events include user_id." /> : null}
+        {riskState.error ? <ErrorBanner message={riskState.error} /> : null}
       </div>
 
       <div className="section-title">
@@ -594,15 +693,9 @@ function AlertsPage() {
     return () => controller.abort();
   }, [loadAlerts, query]);
 
-  useEffect(() => {
-    if (!selectedAlertId) {
-      setDetailState({ data: null, loading: false, error: null, updatedAt: null });
-      return;
-    }
-
-    const controller = new AbortController();
+  const loadDetail = useCallback((alertId: string, signal?: AbortSignal) => {
     setDetailState((current) => ({ ...current, loading: true, error: null }));
-    fetchAlertDetail(selectedAlertId, controller.signal)
+    fetchAlertDetail(alertId, signal)
       .then((data) => {
         setDetailState({ data, loading: false, error: null, updatedAt: new Date() });
       })
@@ -616,9 +709,18 @@ function AlertsPage() {
           error: formatError(error)
         }));
       });
+  }, []);
 
+  useEffect(() => {
+    if (!selectedAlertId) {
+      setDetailState({ data: null, loading: false, error: null, updatedAt: null });
+      return;
+    }
+
+    const controller = new AbortController();
+    loadDetail(selectedAlertId, controller.signal);
     return () => controller.abort();
-  }, [selectedAlertId]);
+  }, [loadDetail, selectedAlertId]);
 
   const applyFilters = () => {
     setQuery({ ...draft, offset: 0 });
@@ -636,7 +738,7 @@ function AlertsPage() {
     <section className="page">
       <PageHeader
         kicker="REQ-004 / REQ-006 / REQ-008"
-        title="Alerts"
+        title="Anomalies"
         description="Abnormal events queried through FastAPI from the formal ClickHouse target path."
         action={
           <button className="icon-button primary" type="button" onClick={() => loadAlerts(query)} disabled={listState.loading}>
@@ -743,10 +845,10 @@ function AlertsPage() {
       </form>
 
       <div className="alerts-layout">
-        <section className="alerts-list-panel" aria-label="Alert list">
+        <section className="alerts-list-panel" aria-label="Anomaly list">
           <div className="table-toolbar">
             <div>
-              <strong>{listState.data?.total.toLocaleString() ?? "0"} alerts</strong>
+              <strong>{listState.data?.total.toLocaleString() ?? "0"} anomalies</strong>
               <span>{formatResultRange(query.offset, query.limit, listState.data?.total ?? 0, listState.data?.items.length ?? 0)} from /api/v1/anomalies</span>
             </div>
             <div className="toolbar-meta">
@@ -805,7 +907,7 @@ function AlertsPage() {
 
             {listState.loading && !listState.data ? <TableSkeleton /> : null}
             {!listState.loading && listState.data?.items.length === 0 ? (
-              <EmptyState title="No alerts matched" detail="Adjust filters or confirm that the detection pipeline has written anomaly events." />
+              <EmptyState title="No anomalies matched" detail="Adjust filters or confirm that the detection pipeline has written anomaly events." />
             ) : null}
           </div>
 
@@ -830,7 +932,16 @@ function AlertsPage() {
           </div>
         </section>
 
-        <AlertDetailPanel state={detailState} selectedAlertId={selectedAlertId} />
+        <AlertDetailPanel
+          state={detailState}
+          selectedAlertId={selectedAlertId}
+          onRefresh={() => {
+            if (selectedAlertId) {
+              loadDetail(selectedAlertId);
+            }
+            loadAlerts(query);
+          }}
+        />
       </div>
     </section>
   );
@@ -838,17 +949,62 @@ function AlertsPage() {
 
 function AlertDetailPanel({
   state,
-  selectedAlertId
+  selectedAlertId,
+  onRefresh
 }: {
   state: LoadState<AnomalyDetailResponse>;
   selectedAlertId: string | null;
+  onRefresh: () => void;
 }) {
   const detail = state.data;
+  const [actionState, setActionState] = useState<{ loading: boolean; message: string | null; error: string | null }>({
+    loading: false,
+    message: null,
+    error: null
+  });
+
+  const runAIJudgement = () => {
+    if (!selectedAlertId) {
+      return;
+    }
+    setActionState({ loading: true, message: null, error: null });
+    analyzeAlert(selectedAlertId)
+      .then((report) => {
+        setActionState({
+          loading: false,
+          message: `AI judgement stored (${report.is_mock ? "mock" : report.model_name}).`,
+          error: null
+        });
+        onRefresh();
+      })
+      .catch((error: unknown) => setActionState({ loading: false, message: null, error: formatError(error) }));
+  };
+
+  const submitFalsePositiveFeedback = () => {
+    if (!detail) {
+      return;
+    }
+    setActionState({ loading: true, message: null, error: null });
+    createFeedback({
+      event_id: detail.anomaly.event_id,
+      tenant_id: detail.anomaly.tenant_id,
+      user_id: detail.anomaly.user_id,
+      judgement_id: typeof detail.ai_judgement.judgement_id === "string" ? detail.ai_judgement.judgement_id : undefined,
+      feedback_type: "false_positive",
+      target_component: "scoring",
+      suggestion: "Analyst marked this anomaly for false-positive review.",
+      confidence: 1
+    })
+      .then((feedback) => {
+        setActionState({ loading: false, message: `Feedback ${feedback.review_status}.`, error: null });
+      })
+      .catch((error: unknown) => setActionState({ loading: false, message: null, error: formatError(error) }));
+  };
 
   if (!selectedAlertId) {
     return (
       <aside className="detail-panel">
-        <EmptyState title="Select an alert" detail="Alert detail will show the evidence chain, related logs, baseline, and AI report from FastAPI." />
+        <EmptyState title="Select an anomaly" detail="Anomaly detail will show the evidence chain, related logs, baseline, and AI report from FastAPI." />
       </aside>
     );
   }
@@ -857,17 +1013,49 @@ function AlertDetailPanel({
     <aside className="detail-panel">
       <div className="detail-panel-header">
         <div>
-          <span className="eyebrow">Alert detail</span>
+          <span className="eyebrow">Anomaly detail</span>
           <h2>{detail?.anomaly.event_id ?? selectedAlertId}</h2>
         </div>
         {detail ? <StatusPill ok={detail.anomaly.ai_status === "analyzed"} label={detail.anomaly.ai_status} /> : null}
       </div>
 
       {state.error ? <ErrorBanner message={state.error} /> : null}
+      {actionState.error ? <ErrorBanner message={actionState.error} /> : null}
+      {actionState.message ? <div className="success-banner">{actionState.message}</div> : null}
       {state.loading && !detail ? <TableSkeleton /> : null}
 
       {detail ? (
         <div className="detail-stack">
+          <section className="detail-section">
+            <div className="detail-section-title">
+              <h3>Actions</h3>
+              <span>{detail.anomaly.ai_status}</span>
+            </div>
+            <div className="inline-actions">
+              <button className="icon-button primary" type="button" onClick={runAIJudgement} disabled={actionState.loading}>
+                <Brain aria-hidden="true" />
+                Analyze
+              </button>
+              <button className="icon-button" type="button" onClick={submitFalsePositiveFeedback} disabled={actionState.loading}>
+                <CheckCircle2 aria-hidden="true" />
+                False positive
+              </button>
+            </div>
+          </section>
+
+          <section className="detail-section">
+            <div className="detail-section-title">
+              <h3>Risk Summary</h3>
+              <span>{detail.anomaly.risk_level}</span>
+            </div>
+            <div className="metrics-band compact-metrics">
+              <Metric icon={BarChart3} label="Risk score" value={String(detail.anomaly.risk_score)} hint="0 to 100" />
+              <Metric icon={ListFilter} label="Reason codes" value={String(detail.anomaly.reason_codes.length)} hint={detail.anomaly.reason_codes.slice(0, 2).join(", ") || "none"} />
+              <Metric icon={Sparkles} label="AI status" value={detail.anomaly.ai_status} hint={isEmptyRecord(detail.ai_judgement) ? "No judgement stored" : "Judgement available"} />
+            </div>
+            <JsonBlock value={detail.anomaly.risk_components} />
+          </section>
+
           <section className="detail-section">
             <div className="detail-section-title">
               <h3>Rule Hits</h3>
@@ -878,6 +1066,13 @@ function AlertDetailPanel({
                 detail.evidence_chain.rule_hits.map((rule) => <span key={rule}>{rule}</span>)
               ) : (
                 <span className="muted">none</span>
+              )}
+            </div>
+            <div className="tag-list">
+              {detail.evidence_chain.reason_codes.length > 0 ? (
+                detail.evidence_chain.reason_codes.map((code) => <span key={code}>{code}</span>)
+              ) : (
+                <span className="muted">no reason codes</span>
               )}
             </div>
           </section>
@@ -925,7 +1120,7 @@ function AlertDetailPanel({
               <h3>Baseline</h3>
               <span>{isEmptyRecord(detail.baseline) ? "missing" : "available"}</span>
             </div>
-            {isEmptyRecord(detail.baseline) ? <p className="muted">No baseline returned for this alert.</p> : <JsonBlock value={detail.baseline} />}
+            {isEmptyRecord(detail.baseline) ? <p className="muted">No baseline returned for this anomaly.</p> : <JsonBlock value={detail.baseline} />}
           </section>
 
           <section className="detail-section">
@@ -934,7 +1129,7 @@ function AlertDetailPanel({
               <span>{isEmptyRecord(detail.ai_judgement) ? "not generated" : "stored"}</span>
             </div>
             {isEmptyRecord(detail.ai_judgement) ? (
-              <p className="muted">No AI judgement returned for this alert.</p>
+              <p className="muted">No AI judgement returned for this anomaly.</p>
             ) : (
               <JsonBlock value={detail.ai_judgement} />
             )}
@@ -942,6 +1137,293 @@ function AlertDetailPanel({
         </div>
       ) : null}
     </aside>
+  );
+}
+
+function UserProfilesPage() {
+  const [query, setQuery] = useState({ limit: 25, offset: 0 });
+  const [state, setState] = useState<LoadState<{ items: UserBaseline[]; total: number }>>({
+    data: null,
+    loading: true,
+    error: null,
+    updatedAt: null
+  });
+
+  const load = useCallback((activeQuery = query, signal?: AbortSignal) => {
+    setState((current) => ({ ...current, loading: true, error: null }));
+    fetchBaselines(activeQuery, signal)
+      .then((data) => setState({ data: { items: data.items, total: data.total }, loading: false, error: null, updatedAt: new Date() }))
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        setState((current) => ({ ...current, loading: false, error: formatError(error) }));
+      });
+  }, [query]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    load(query, controller.signal);
+    return () => controller.abort();
+  }, [load, query]);
+
+  return (
+    <section className="page">
+      <PageHeader
+        kicker="REQ-003 / REQ-006"
+        title="User Profiles"
+        description="Behavior baseline profiles from ClickHouse-backed user baseline APIs."
+        action={
+          <button className="icon-button primary" type="button" onClick={() => load()} disabled={state.loading}>
+            <RefreshCcw aria-hidden="true" className={state.loading ? "spin" : ""} />
+            Refresh
+          </button>
+        }
+      />
+      {state.error ? <ErrorBanner message={state.error} /> : null}
+      <div className="profile-grid">
+        {state.data?.items.map((profile) => (
+          <article className="profile-card" key={`${profile.tenant_id}:${profile.user_id}:${profile.baseline_date}`}>
+            <div className="profile-card-head">
+              <div>
+                <span className="eyebrow">{profile.tenant_id}</span>
+                <h2>{profile.user_id}</h2>
+              </div>
+              <StatusPill ok={profile.baseline_confidence >= 0.7} label={`confidence ${profile.baseline_confidence}`} />
+            </div>
+            <div className="profile-meta">
+              <span>{profile.baseline_date}</span>
+              <span>{profile.sample_days} days</span>
+              <span>{profile.sample_count} samples</span>
+              <span>{profile.fallback_level ?? "none"}</span>
+            </div>
+            <div className="profile-sections">
+              <ProfileSection title="Who" value={profile.who_profile} />
+              <ProfileSection title="Time" value={profile.time_profile} />
+              <ProfileSection title="Location" value={profile.location_profile} />
+              <ProfileSection title="Access" value={profile.access_profile} />
+              <ProfileSection title="Volume" value={profile.volume_profile} />
+              <ProfileSection title="Result" value={profile.result_profile} />
+              <ProfileSection title="Why" value={profile.why_profile} />
+            </div>
+          </article>
+        ))}
+        {!state.loading && state.data?.items.length === 0 ? <EmptyState title="No user profiles" detail="No baseline records are available yet." /> : null}
+      </div>
+      <PaginationControls
+        limit={query.limit}
+        offset={query.offset}
+        total={state.data?.total ?? 0}
+        onPrevious={() => setQuery((current) => ({ ...current, offset: Math.max(0, current.offset - current.limit) }))}
+        onNext={() => setQuery((current) => ({ ...current, offset: current.offset + current.limit }))}
+      />
+    </section>
+  );
+}
+
+function ProfileSection({ title, value }: { title: string; value: Record<string, unknown> }) {
+  return (
+    <section>
+      <h3>{title}</h3>
+      <JsonBlock value={value} />
+    </section>
+  );
+}
+
+function AIJudgementPage() {
+  const [query, setQuery] = useState({ limit: 25, offset: 0 });
+  const [state, setState] = useState<LoadState<{ items: AIJudgement[]; total: number }>>({
+    data: null,
+    loading: true,
+    error: null,
+    updatedAt: null
+  });
+
+  const load = useCallback((activeQuery = query, signal?: AbortSignal) => {
+    setState((current) => ({ ...current, loading: true, error: null }));
+    fetchAIReports(activeQuery, signal)
+      .then((data) => setState({ data: { items: data.items, total: data.total }, loading: false, error: null, updatedAt: new Date() }))
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        setState((current) => ({ ...current, loading: false, error: formatError(error) }));
+      });
+  }, [query]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    load(query, controller.signal);
+    return () => controller.abort();
+  }, [load, query]);
+
+  return (
+    <section className="page">
+      <PageHeader
+        kicker="REQ-004 / REQ-006"
+        title="AI Judgement"
+        description="Stored AI anomaly judgements and explicit mock markers."
+        action={
+          <button className="icon-button primary" type="button" onClick={() => load()} disabled={state.loading}>
+            <RefreshCcw aria-hidden="true" className={state.loading ? "spin" : ""} />
+            Refresh
+          </button>
+        }
+      />
+      {state.error ? <ErrorBanner message={state.error} /> : null}
+      <div className="compact-list">
+        {state.data?.items.map((item) => (
+          <article className="judgement-card" key={item.judgement_id}>
+            <div className="profile-card-head">
+              <div>
+                <span className="eyebrow">{item.event_id}</span>
+                <h2>{item.attack_type || "unknown attack"}</h2>
+              </div>
+              <span className={`risk-chip ${riskTone(item.risk_level)}`}>{item.risk_level}</span>
+            </div>
+            <p>{item.judgement}</p>
+            <div className="tag-list">
+              <span>{item.model_name}</span>
+              <span>{item.is_mock ? "is_mock: true" : "is_mock: false"}</span>
+              <span>confidence {item.confidence}</span>
+            </div>
+            <JsonBlock value={{ key_reasons: item.key_reasons, recommended_actions: item.recommended_actions, feedback_suggestions: item.feedback_suggestions }} />
+          </article>
+        ))}
+        {!state.loading && state.data?.items.length === 0 ? <EmptyState title="No AI judgements" detail="AI judgement records will appear after anomaly analysis writes ai_judgements." /> : null}
+      </div>
+      <PaginationControls
+        limit={query.limit}
+        offset={query.offset}
+        total={state.data?.total ?? 0}
+        onPrevious={() => setQuery((current) => ({ ...current, offset: Math.max(0, current.offset - current.limit) }))}
+        onNext={() => setQuery((current) => ({ ...current, offset: current.offset + current.limit }))}
+      />
+    </section>
+  );
+}
+
+function DailyReportsPage() {
+  const [query, setQuery] = useState({ limit: 20, offset: 0 });
+  const [date, setDate] = useState(todayInShanghai());
+  const [state, setState] = useState<LoadState<{ items: DailyReport[]; total: number }>>({
+    data: null,
+    loading: true,
+    error: null,
+    updatedAt: null
+  });
+  const [createState, setCreateState] = useState<{ loading: boolean; message: string | null; error: string | null }>({
+    loading: false,
+    message: null,
+    error: null
+  });
+
+  const load = useCallback((activeQuery = query, signal?: AbortSignal) => {
+    setState((current) => ({ ...current, loading: true, error: null }));
+    fetchDailyReports(activeQuery, signal)
+      .then((data) => setState({ data: { items: data.items, total: data.total }, loading: false, error: null, updatedAt: new Date() }))
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        setState((current) => ({ ...current, loading: false, error: formatError(error) }));
+      });
+  }, [query]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    load(query, controller.signal);
+    return () => controller.abort();
+  }, [load, query]);
+
+  const generate = () => {
+    if (createState.loading) {
+      return;
+    }
+    setCreateState({ loading: true, message: null, error: null });
+    createDailyReport({ date })
+      .then((report) => {
+        setCreateState({ loading: false, message: `Report ready for ${report.date}.`, error: null });
+        load();
+      })
+      .catch((error: unknown) => setCreateState({ loading: false, message: null, error: formatError(error) }));
+  };
+
+  return (
+    <section className="page">
+      <PageHeader
+        kicker="REQ-005 / REQ-006"
+        title="Daily Reports"
+        description="Daily security posture reports generated from logs, anomalies, and AI judgements."
+        action={
+          <div className="header-actions">
+            <input className="date-input" type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+            <button className="icon-button primary" type="button" onClick={generate} disabled={createState.loading}>
+              <FileText aria-hidden="true" />
+              Generate
+            </button>
+          </div>
+        }
+      />
+      {state.error ? <ErrorBanner message={state.error} /> : null}
+      {createState.error ? <ErrorBanner message={createState.error} /> : null}
+      {createState.message ? <div className="success-banner">{createState.message}</div> : null}
+      <div className="report-grid">
+        {state.data?.items.map((report) => (
+          <article className="report-card" key={report.report_id}>
+            <div className="profile-card-head">
+              <div>
+                <span className="eyebrow">{report.date}</span>
+                <h2>Score {report.overall_score}</h2>
+              </div>
+              <StatusPill ok={report.high_risk_count === 0} label={`${report.high_risk_count} high risk`} />
+            </div>
+            <div className="metrics-band compact-metrics">
+              <Metric icon={Database} label="Logs" value={formatNumber(report.log_count)} hint="security_logs" />
+              <Metric icon={AlertCircle} label="Anomalies" value={formatNumber(report.alert_count)} hint="anomaly_events" />
+              <Metric icon={UserRound} label="Risk users" value={String(report.high_risk_users.length)} hint={report.high_risk_users.slice(0, 2).join(", ") || "none"} />
+            </div>
+            <p>{report.ai_summary}</p>
+            <p className="risk-reason">{report.recommendation}</p>
+            <JsonBlock value={{ major_risks: report.major_risks, typical_alerts: report.typical_alerts }} />
+          </article>
+        ))}
+        {!state.loading && state.data?.items.length === 0 ? <EmptyState title="No daily reports" detail="Generate a report for the selected date after ClickHouse has source data." /> : null}
+      </div>
+      <PaginationControls
+        limit={query.limit}
+        offset={query.offset}
+        total={state.data?.total ?? 0}
+        onPrevious={() => setQuery((current) => ({ ...current, offset: Math.max(0, current.offset - current.limit) }))}
+        onNext={() => setQuery((current) => ({ ...current, offset: current.offset + current.limit }))}
+      />
+    </section>
+  );
+}
+
+function PaginationControls({
+  limit,
+  offset,
+  total,
+  onPrevious,
+  onNext
+}: {
+  limit: number;
+  offset: number;
+  total: number;
+  onPrevious: () => void;
+  onNext: () => void;
+}) {
+  return (
+    <div className="pagination">
+      <button className="icon-button" type="button" disabled={offset <= 0} onClick={onPrevious}>
+        Previous
+      </button>
+      <span>Offset {offset.toLocaleString()}</span>
+      <button className="icon-button" type="button" disabled={offset + limit >= total} onClick={onNext}>
+        Next
+      </button>
+    </div>
   );
 }
 
@@ -1081,6 +1563,21 @@ function formatDateTime(value?: string | null): string {
   }
 
   return date.toLocaleString();
+}
+
+function formatNumber(value?: number | null): string {
+  return typeof value === "number" ? value.toLocaleString() : "0";
+}
+
+function todayInShanghai(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
 function formatSource(value: SourceType): string {
