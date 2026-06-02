@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from src.config import settings
@@ -183,6 +183,46 @@ DATA_QUALITY_COLUMNS: tuple[str, ...] = (
     "created_at",
 )
 
+DAILY_FEATURES_COLUMNS: tuple[str, ...] = (
+    "feature_date",
+    "tenant_id",
+    "user_id",
+    "account_type",
+    "login_count",
+    "failed_login_count",
+    "success_login_count",
+    "distinct_src_ip_count",
+    "distinct_host_count",
+    "distinct_action_count",
+    "first_seen_time",
+    "last_seen_time",
+    "night_event_count",
+    "sensitive_action_count",
+    "download_count",
+    "permission_change_count",
+    "new_source_count",
+    "maintenance_window_hit_count",
+    "common_src_ips",
+    "common_ip_prefixes",
+    "common_hosts",
+    "common_actions",
+    "profile_metrics",
+    "created_at",
+)
+
+SEEN_SOURCES_COLUMNS: tuple[str, ...] = (
+    "tenant_id",
+    "user_id",
+    "source_type",
+    "source_key",
+    "first_seen_time",
+    "last_seen_time",
+    "seen_count",
+    "created_at",
+    "updated_at",
+)
+
+DAILY_FEATURES_JSON_FIELDS: set[str] = {"profile_metrics", "common_src_ips", "common_ip_prefixes", "common_hosts", "common_actions"}
 AI_JUDGEMENT_JSON_FIELDS = {"feedback_suggestions", "raw_response"}
 DAILY_REPORT_JSON_FIELDS = set()
 
@@ -428,7 +468,22 @@ class ClickHouseStorage:
                 _model_payload(item),
                 ANOMALY_COLUMNS,
                 json_fields=ANOMALY_JSON_FIELDS,
-                defaults={"model_version": "", "ai_status": "not_required", "status": "new"},
+                defaults={
+                    "model_version": "",
+                    "ai_status": "not_required",
+                    "status": "new",
+                    "user_id": "",
+                    "src_ip": "",
+                    "host": "",
+                    "source_type": "",
+                    "action": "",
+                    "object_type": "",
+                    "object_id": "",
+                    "attack_type": "unknown",
+                    "scenario_id": "",
+                    "scenario_type": "",
+                    "attack_chain_id": "",
+                },
             )
             for item in anomalies
         ]
@@ -489,33 +544,39 @@ class ClickHouseStorage:
         )
         where_sql = _where(filters)
         parameters |= _pagination_parameters(limit=limit, offset=offset)
+        # Pick the latest baseline per (tenant_id, user_id) — each user has exactly one active baseline
         rows = self._select_dicts(
             f"""
-            WITH baseline_keys AS (
-                SELECT tenant_id, user_id, baseline_date, model_version, trained_from, trained_to
+            WITH latest_per_user AS (
+                SELECT tenant_id, user_id, max(baseline_date) AS baseline_date
                 FROM ueba_user_baseline
                 {where_sql}
-                GROUP BY tenant_id, user_id, baseline_date, model_version, trained_from, trained_to
-                ORDER BY baseline_date DESC, user_id ASC
+                GROUP BY tenant_id, user_id
+                ORDER BY user_id ASC
                 LIMIT {{limit:UInt64}} OFFSET {{offset:UInt64}}
+            ),
+            baseline_keys AS (
+                SELECT DISTINCT b.tenant_id, b.user_id, b.baseline_date,
+                       b.model_version, b.trained_from, b.trained_to
+                FROM ueba_user_baseline AS b
+                INNER JOIN latest_per_user AS l
+                    ON b.tenant_id = l.tenant_id
+                   AND b.user_id = l.user_id
+                   AND b.baseline_date = l.baseline_date
             )
             SELECT {_columns_sql(BASELINE_COLUMNS, "b")}
             FROM ueba_user_baseline AS b
             INNER JOIN baseline_keys AS k
                 USING (tenant_id, user_id, baseline_date, model_version, trained_from, trained_to)
-            ORDER BY b.baseline_date DESC, b.user_id ASC, b.profile_group ASC, b.feature_name ASC
+            ORDER BY b.user_id ASC, b.profile_group ASC, b.feature_name ASC
             """,
             parameters,
         )
         total = self._select_scalar(
             f"""
-            SELECT count()
-            FROM (
-                SELECT tenant_id, user_id, baseline_date, model_version, trained_from, trained_to
-                FROM ueba_user_baseline
-                {where_sql}
-                GROUP BY tenant_id, user_id, baseline_date, model_version, trained_from, trained_to
-            )
+            SELECT count(DISTINCT (tenant_id, user_id))
+            FROM ueba_user_baseline
+            {where_sql}
             """,
             parameters,
             default=0,
@@ -659,11 +720,68 @@ class ClickHouseStorage:
         return int(value or 0)
 
     def insert_user_baselines(self, baselines: Sequence[UserBaseline | dict[str, Any]]) -> None:
+        """Insert baselines, replacing any existing entries for the same users."""
+        if not baselines:
+            return
+        # Dedup: delete existing baselines for these users before inserting
+        payloads = [_model_payload(b) for b in baselines]
+        keys: set[tuple[str, str]] = set()
+        for p in payloads:
+            keys.add((str(p.get("tenant_id", "default")), str(p["user_id"])))
+        for tenant_id, user_id in keys:
+            self.client.command(
+                "ALTER TABLE ueba_user_baseline DELETE WHERE tenant_id = {t:String} AND user_id = {u:String}",
+                parameters={"t": tenant_id, "u": user_id},
+            )
         rows: list[list[Any]] = []
-        for baseline in baselines:
-            rows.extend(_baseline_rows_from_payload(_model_payload(baseline)))
-        if rows:
-            self.client.insert("ueba_user_baseline", rows, column_names=list(BASELINE_COLUMNS))
+        for payload in payloads:
+            rows.extend(_baseline_rows_from_payload(payload))
+        self.client.insert("ueba_user_baseline", rows, column_names=list(BASELINE_COLUMNS))
+
+    def insert_user_daily_features(self, rows: list[dict[str, Any]]) -> None:
+        processed: list[list[Any]] = []
+        now_dt = datetime.now(timezone.utc)
+        for row in rows:
+            row.setdefault("tenant_id", "default")
+            row.setdefault("created_at", now_dt)
+            processed.append([row.get(col) for col in DAILY_FEATURES_COLUMNS])
+        if processed:
+            self.client.insert("ueba_user_daily_features", processed, column_names=list(DAILY_FEATURES_COLUMNS))
+
+    def upsert_user_seen_sources(self, sources: list[dict[str, Any]]) -> None:
+        processed: list[list[Any]] = []
+        now_dt = datetime.now(timezone.utc)
+        for s in sources:
+            s.setdefault("tenant_id", "default")
+            s.setdefault("created_at", now_dt)
+            s.setdefault("updated_at", now_dt)
+            s.setdefault("first_seen_time", now_dt)
+            s.setdefault("last_seen_time", now_dt)
+            processed.append([s.get(col) for col in SEEN_SOURCES_COLUMNS])
+        if processed:
+            self.client.insert("user_seen_sources", processed, column_names=list(SEEN_SOURCES_COLUMNS))
+
+    def query_user_seen_sources(
+        self,
+        tenant_id: str = "default",
+        user_id: str | None = None,
+        source_type: str | None = None,
+        source_key: str | None = None,
+        limit: int = 10000,
+    ) -> list[dict[str, Any]]:
+        filters: list[str] = ["tenant_id = {tenant_id:String}"]
+        parameters: dict[str, Any] = {"tenant_id": tenant_id}
+        if user_id:
+            filters.append("user_id = {user_id:String}")
+            parameters["user_id"] = user_id
+        if source_type:
+            filters.append("source_type = {source_type:String}")
+            parameters["source_type"] = source_type
+        if source_key:
+            filters.append("source_key = {source_key:String}")
+            parameters["source_key"] = source_key
+        sql = f"SELECT * FROM user_seen_sources {_where(filters)} LIMIT {{limit:UInt64}}"
+        return self._select_dicts(sql, parameters | {"limit": limit})
 
     def list_daily_reports(
         self,
@@ -1114,11 +1232,17 @@ def _baseline_feature_value(value: Any) -> dict[str, Any]:
     if isinstance(value, list):
         return {"common_values": _string_list(value), "value_histogram": {}}
     if isinstance(value, dict):
-        numeric_fields = {
-            field: value.get(field)
-            for field in ("mean_value", "std_value", "p50_value", "p95_value", "p99_value")
-            if isinstance(value.get(field), (int, float))
-        }
+        numeric_fields = {}
+        for src_key, tgt_key in (
+            ("mean_value", "mean_value"), ("std_value", "std_value"),
+            ("p50_value", "p50_value"), ("p95_value", "p95_value"), ("p99_value", "p99_value"),
+            # Also accept short key names used by the baseline builder
+            ("mean", "mean_value"), ("std", "std_value"),
+            ("p50", "p50_value"), ("p95", "p95_value"), ("p99", "p99_value"),
+        ):
+            raw = value.get(src_key)
+            if isinstance(raw, (int, float)):
+                numeric_fields[tgt_key] = float(raw)
         common_values = value.get("common_values")
         histogram = value.get("value_histogram")
         if numeric_fields or common_values is not None or histogram is not None:

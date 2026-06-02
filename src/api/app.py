@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -36,6 +36,7 @@ from src.schemas import (
 )
 from src.storage import ClickHouseStorage
 from src.ueba import build_and_store_baselines
+from src.ueba.baseline import aggregate_daily_features, update_seen_sources
 
 
 ERROR_RESPONSE_SCHEMA = {
@@ -446,7 +447,31 @@ def list_baselines(
 def rebuild_baselines(
     storage: ClickHouseStorage = Depends(get_storage),
 ) -> BaselineRebuildResponse:
+    """Backfill daily features for all dates with logs, then rebuild baselines from ALL data."""
     try:
+        # 1. Find the date range that has logs but may not have features yet
+        from datetime import date as _date
+        today = _date.today()
+        first_log = storage._select_scalar(
+            "SELECT min(event_time::Date) FROM security_logs WHERE tenant_id = {t:String}",
+            parameters={"t": "default"},
+            default=today,
+        )
+        if first_log is None:
+            first_log = today
+
+        # 2. Aggregate daily features for every day that has logs (backfill)
+        agg_dates = 0
+        d = first_log if isinstance(first_log, _date) else first_log
+        while d <= today:
+            aggregate_daily_features(storage, target_date=datetime.combine(d, datetime.min.time(), tzinfo=timezone.utc))
+            agg_dates += 1
+            d += timedelta(days=1)
+
+        # 3. Update seen sources for the full range
+        update_seen_sources(storage)
+
+        # 4. Build baselines from ALL available daily features (90-day window)
         baselines = build_and_store_baselines(storage)
     except Exception as exc:
         raise HTTPException(
