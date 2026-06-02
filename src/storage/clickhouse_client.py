@@ -473,6 +473,55 @@ class ClickHouseStorage:
             parameters,
         )
 
+    def list_user_risk_stats(
+        self,
+        *,
+        tenant_id: str | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        filters, parameters = _build_anomaly_filters(
+            tenant_id=tenant_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        filters.append("user_id != ''")
+        where_sql = _where(filters)
+        parameters |= _pagination_parameters(limit=limit, offset=offset)
+        rows = self._select_dicts(
+            f"""
+            SELECT
+                user_id,
+                count() AS anomaly_count,
+                countIf(risk_level IN ('high', 'critical')) AS high_risk_count,
+                countIf(risk_level = 'critical') AS critical_count,
+                max(risk_score) AS max_risk_score,
+                max(event_time) AS latest_event_time
+            FROM anomaly_events
+            {where_sql}
+            GROUP BY user_id
+            ORDER BY high_risk_count DESC, max_risk_score DESC, anomaly_count DESC, latest_event_time DESC
+            LIMIT {{limit:UInt64}} OFFSET {{offset:UInt64}}
+            """,
+            parameters,
+        )
+        total = self._select_scalar(
+            f"""
+            SELECT count()
+            FROM (
+                SELECT user_id
+                FROM anomaly_events
+                {where_sql}
+                GROUP BY user_id
+            )
+            """,
+            parameters,
+            default=0,
+        )
+        return rows, int(total or 0)
+
     def list_user_baselines(
         self,
         *,

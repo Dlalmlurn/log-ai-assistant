@@ -147,6 +147,29 @@ def test_create_daily_report_generates_and_stores_report(monkeypatch):
     assert response.report_id == "daily-gen-1"
     assert response.date == "2026-05-13"
     assert storage.inserted_daily == [{"report": fake_report, "tenant_id": "default"}]
+    assert storage.calls == [
+        {
+            "method": "list_daily_reports",
+            "tenant_id": "default",
+            "start_date": datetime(2026, 5, 13, tzinfo=timezone.utc).date(),
+            "end_date": datetime(2026, 5, 13, tzinfo=timezone.utc).date(),
+            "limit": 1,
+            "offset": 0,
+        }
+    ]
+
+
+def test_create_daily_report_is_idempotent_for_existing_report(monkeypatch):
+    def fake_generate(storage, date_str=None):
+        raise AssertionError("existing daily report should be reused")
+
+    monkeypatch.setattr(api_app_module, "generate_daily_report", fake_generate)
+    storage = FakeStorage(items=[DAILY_REPORT_DOC], total=1)
+
+    response = create_daily_report(date="2026-05-13", tenant_id="default", storage=storage)
+
+    assert response.report_id == "default:2026-05-13"
+    assert storage.inserted_daily == []
 
 
 def test_create_daily_report_returns_error_on_invalid_date(monkeypatch):

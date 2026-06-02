@@ -467,6 +467,29 @@ def test_get_stats_overview_queries_log_and_anomaly_counts() -> None:
     }
 
 
+def test_list_user_risk_stats_excludes_empty_users_and_orders_by_risk() -> None:
+    now = datetime(2026, 5, 13, 10, 0, tzinfo=timezone.utc)
+    fake = FakeClickHouseClient(
+        [
+            QueryResult(
+                [("alice", 4, 2, 1, 96.0, now)],
+                ["user_id", "anomaly_count", "high_risk_count", "critical_count", "max_risk_score", "latest_event_time"],
+            ),
+            QueryResult([(1,)]),
+        ]
+    )
+    storage = ClickHouseStorage(client=fake)
+
+    items, total = storage.list_user_risk_stats(tenant_id="default", limit=10, offset=0)
+
+    assert total == 1
+    assert items[0]["user_id"] == "alice"
+    assert items[0]["critical_count"] == 1
+    assert "user_id != ''" in fake.queries[0]["sql"]
+    assert "ORDER BY high_risk_count DESC, max_risk_score DESC" in fake.queries[0]["sql"]
+    assert fake.queries[0]["parameters"] == {"tenant_id": "default", "limit": 10, "offset": 0}
+
+
 def _row(columns: tuple[str, ...], **values: Any) -> tuple[Any, ...]:
     return tuple(values.get(column, _default_value(column)) for column in columns)
 

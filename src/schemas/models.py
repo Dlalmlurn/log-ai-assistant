@@ -158,6 +158,19 @@ class AIFeedback(BaseModel):
     created_at: datetime
 
 
+class FeedbackCreateRequest(BaseModel):
+    """Compact request body for human or AI-suggested feedback submission."""
+
+    event_id: str
+    judgement_id: str | None = None
+    tenant_id: str = "default"
+    user_id: str | None = None
+    feedback_type: FeedbackType
+    suggestion: str
+    target_component: FeedbackTargetComponent
+    confidence: float = Field(default=1.0, ge=0, le=1)
+
+
 class UserDailyFeature(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -328,3 +341,28 @@ class AIJudgementListResponse(ListResponse[AIJudgement]):
 
 class DailyReportListResponse(ListResponse[DailyReport]):
     """Reusable list response for daily reports."""
+
+
+class StatsOverviewResponse(BaseModel):
+    """Workbench overview counters backed by ClickHouse."""
+
+    log_count: int = Field(default=0, ge=0)
+    latest_log_ingest_time: datetime | None = None
+    anomaly_count: int = Field(default=0, ge=0)
+    high_risk_count: int = Field(default=0, ge=0)
+    critical_count: int = Field(default=0, ge=0)
+
+
+class UserRiskStats(BaseModel):
+    """User risk ranking row derived from anomaly_events."""
+
+    user_id: str
+    anomaly_count: int = Field(default=0, ge=0)
+    high_risk_count: int = Field(default=0, ge=0)
+    critical_count: int = Field(default=0, ge=0)
+    max_risk_score: float = Field(default=0, ge=0, le=100)
+    latest_event_time: datetime | None = None
+
+
+class UserRiskStatsListResponse(ListResponse[UserRiskStats]):
+    """Reusable list response for user risk ranking."""

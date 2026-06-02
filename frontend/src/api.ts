@@ -1,4 +1,5 @@
 import type {
+  AIFeedback,
   AIJudgement,
   AnomalyDetailResponse,
   AnomalyEvent,
@@ -7,11 +8,14 @@ import type {
   BaselineRebuildResponse,
   DailyReport,
   DailyReportCreateQuery,
+  FeedbackCreateRequest,
   HealthResponse,
   ListResponse,
   LogsQuery,
   NormalizedLog,
   PaginationQuery,
+  StatsOverview,
+  UserRiskStats,
   UserBaseline
 } from "./types";
 
@@ -98,6 +102,29 @@ export async function createDailyReport(
     method: "POST",
     signal
   });
+}
+
+export async function createFeedback(request: FeedbackCreateRequest, signal?: AbortSignal): Promise<AIFeedback> {
+  return apiFetch<AIFeedback>("/api/v1/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    signal
+  });
+}
+
+export async function fetchStatsOverview(
+  query: Partial<{ tenant_id: string; start_time: string; end_time: string }> = {},
+  signal?: AbortSignal
+): Promise<StatsOverview> {
+  return apiFetch<StatsOverview>(withQuery("/api/v1/stats/overview", query), { signal });
+}
+
+export async function fetchUserRiskStats(
+  query: PaginationQuery,
+  signal?: AbortSignal
+): Promise<ListResponse<UserRiskStats>> {
+  return apiFetch<ListResponse<UserRiskStats>>(withQuery("/api/v1/stats/users/risk", query), { signal });
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {

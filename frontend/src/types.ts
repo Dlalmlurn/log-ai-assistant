@@ -117,6 +117,48 @@ export type AIJudgement = {
   is_mock: boolean;
 };
 
+export type AIFeedback = {
+  feedback_id: string;
+  event_id: string;
+  judgement_id?: string | null;
+  tenant_id: string;
+  user_id?: string | null;
+  feedback_type: "rule_weight" | "baseline_threshold" | "false_positive" | "new_pattern" | "data_contract";
+  suggestion: string;
+  target_component: "rule" | "baseline" | "scoring" | "data_contract";
+  confidence: number;
+  review_status: "pending" | "accepted" | "rejected";
+  created_at: string;
+};
+
+export type FeedbackCreateRequest = {
+  event_id: string;
+  judgement_id?: string | null;
+  tenant_id?: string;
+  user_id?: string | null;
+  feedback_type: AIFeedback["feedback_type"];
+  suggestion: string;
+  target_component: AIFeedback["target_component"];
+  confidence?: number;
+};
+
+export type StatsOverview = {
+  log_count: number;
+  latest_log_ingest_time: string | null;
+  anomaly_count: number;
+  high_risk_count: number;
+  critical_count: number;
+};
+
+export type UserRiskStats = {
+  user_id: string;
+  anomaly_count: number;
+  high_risk_count: number;
+  critical_count: number;
+  max_risk_score: number;
+  latest_event_time: string | null;
+};
+
 export type EvidenceChain = {
   rule_hits: string[];
   baseline_deviations: string[];
