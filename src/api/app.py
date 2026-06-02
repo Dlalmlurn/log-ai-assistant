@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date as Date, datetime, timezone
+from datetime import date as Date, datetime, timedelta, timezone
 from threading import Lock
 from typing import Any
 
@@ -42,6 +42,7 @@ from src.schemas import (
 )
 from src.storage import ClickHouseStorage
 from src.ueba import build_and_store_baselines
+from src.ueba.baseline import aggregate_daily_features, update_seen_sources
 
 
 ERROR_RESPONSE_SCHEMA = {
@@ -454,7 +455,28 @@ def list_baselines(
 def rebuild_baselines(
     storage: ClickHouseStorage = Depends(get_storage),
 ) -> BaselineRebuildResponse:
+    """Backfill daily features for all dates with logs, then rebuild baselines from ALL data."""
     try:
+        if hasattr(storage, "_select_scalar"):
+            today = datetime.now(timezone.utc).date()
+            first_log = storage._select_scalar(
+                "SELECT min(toDate(event_time)) FROM security_logs WHERE tenant_id = {t:String}",
+                parameters={"t": "default"},
+                default=today,
+            )
+            if first_log is None:
+                first_log = today
+
+            current_day = first_log if isinstance(first_log, Date) else Date.fromisoformat(str(first_log))
+            while current_day <= today:
+                aggregate_daily_features(
+                    storage,
+                    target_date=datetime.combine(current_day, datetime.min.time(), tzinfo=timezone.utc),
+                )
+                current_day += timedelta(days=1)
+
+            update_seen_sources(storage)
+
         baselines = build_and_store_baselines(storage)
     except Exception as exc:
         raise HTTPException(
