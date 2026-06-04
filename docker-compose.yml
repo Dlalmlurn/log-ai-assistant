@@ -160,6 +160,40 @@ services:
       timeout: 10s
       retries: 10
 
+  anomaly-detector:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
+    container_name: log-ai-anomaly-detector
+    profiles: ["detector"]
+    environment:
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse}
+      CLICKHOUSE_HTTP_PORT: ${CLICKHOUSE_HTTP_PORT:-8123}
+      CLICKHOUSE_NATIVE_PORT: ${CLICKHOUSE_NATIVE_PORT:-9000}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-log_ai}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    command:
+      [
+        "python",
+        "-m",
+        "src.main",
+        "detect-worker",
+        "--interval-seconds",
+        "${ANOMALY_DETECTOR_INTERVAL_SECONDS:-30}",
+        "--lookback-minutes",
+        "${ANOMALY_DETECTOR_LOOKBACK_MINUTES:-10}",
+        "--batch-size",
+        "${ANOMALY_DETECTOR_BATCH_SIZE:-1000}",
+      ]
+
   frontend:
     build:
       context: .

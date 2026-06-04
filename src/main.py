@@ -17,6 +17,7 @@ from src.ai_engine import AIAnalyzer
 from src.collector import run_generator_once, stream_file_to_kafka
 from src.config import PROJECT_ROOT, settings
 from src.detection import detect_batch
+from src.detection.worker import AnomalyDetectorWorker, DetectionRunSummary
 from src.health import get_cli_health_payload
 from src.parser import normalize_raw_record, run_raw_to_parsed_worker
 from src.report import generate_daily_report
@@ -161,6 +162,20 @@ def cmd_detect(args: argparse.Namespace) -> None:
     print(f"offline detect finished, anomalies={len(anomalies)}")
 
 
+def cmd_detect_worker(args: argparse.Namespace) -> None:
+    storage = ClickHouseStorage()
+    worker = AnomalyDetectorWorker(
+        storage=storage,
+        lookback_minutes=args.lookback_minutes,
+        batch_size=args.batch_size,
+    )
+    if args.once:
+        summary = worker.run_once()
+        print(_detection_summary_line(summary))
+        return
+    worker.run_forever(interval_seconds=args.interval_seconds)
+
+
 def cmd_analyze_alerts(args: argparse.Namespace) -> None:
     storage = ClickHouseStorage()
     analyzer = AIAnalyzer()
@@ -246,6 +261,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_detect.add_argument("--size", type=int, default=5000)
     p_detect.set_defaults(func=cmd_detect)
 
+    p_detect_worker = sub.add_parser("detect-worker", help="持续运行异常检测并写入 anomaly_events")
+    p_detect_worker.add_argument("--once", action="store_true", help="只执行一轮检测后退出")
+    p_detect_worker.add_argument("--interval-seconds", type=int, default=30, help="持续运行时每轮间隔秒数")
+    p_detect_worker.add_argument("--lookback-minutes", type=int, default=10, help="首次启动回看多少分钟日志")
+    p_detect_worker.add_argument("--batch-size", type=int, default=1000, help="每轮最多读取多少条日志")
+    p_detect_worker.set_defaults(func=cmd_detect_worker)
+
     p_analyze = sub.add_parser("analyze-alerts", help="对未研判异常事件调用大模型")
     p_analyze.add_argument("--limit", type=int, default=100)
     p_analyze.set_defaults(func=cmd_analyze_alerts)
@@ -258,6 +280,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_health.set_defaults(func=cmd_health)
 
     return parser
+
+
+def _detection_summary_line(summary: DetectionRunSummary) -> str:
+    last = summary.last_event_time.isoformat() if summary.last_event_time else "-"
+    return (
+        "detector round finished: "
+        f"logs_read={summary.logs_read} "
+        f"anomalies_detected={summary.anomalies_detected} "
+        f"anomalies_inserted={summary.anomalies_inserted} "
+        f"last_event_time={last} "
+        f"duration_ms={summary.duration_ms}"
+    )
 
 
 def main() -> None:

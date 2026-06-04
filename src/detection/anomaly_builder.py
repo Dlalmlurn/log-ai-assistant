@@ -8,6 +8,7 @@ RuleEngine 负责“发现异常”，AnomalyEventBuilder 负责“写异常报�
 
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
+import hashlib
 from typing import Any
 import uuid
 
@@ -101,6 +102,7 @@ class AnomalyEventBuilder:
         related_event_ids: list[str] | None = None,
         baseline_deviations: list[dict[str, Any]] | None = None,
         risk_component_overrides: dict[str, int] | None = None,
+        event_id_seed: str | None = None,
         attack_type: str | None = None,
         model_version: str = "rule-v1",
     ) -> AnomalyEvent:
@@ -129,7 +131,7 @@ class AnomalyEventBuilder:
 
         # payload 的字段尽量贴近 AnomalyEvent schema，后续落库/API 展示都吃这一份结构。
         payload = {
-            "event_id": str(uuid.uuid4()),
+            "event_id": _event_id(event_id_seed),
             "event_time": log.event_time,
             "detect_time": now,
             "tenant_id": log.tenant_id,
@@ -165,6 +167,15 @@ def _now() -> datetime:
     """返回当前 UTC 时间，作为默认检测时间。"""
 
     return datetime.now(timezone.utc)
+
+
+def _event_id(seed: str | None) -> str:
+    """有 seed 时生成稳定异常 ID；没有 seed 时保持随机 UUID。"""
+
+    if not seed:
+        return str(uuid.uuid4())
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return f"anom-{digest[:32]}"
 
 
 def _risk_components(

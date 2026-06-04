@@ -7,7 +7,9 @@ from __future__ import annotations
 """
 
 from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
 from typing import Deque
 
 from src.config import settings
@@ -21,6 +23,14 @@ SENSITIVE_KEYWORDS = ("export", "download", "admin", "/admin", "sensitive", "con
 WINDOW_1M = timedelta(minutes=1)
 WINDOW_5M = timedelta(minutes=5)
 WINDOW_10M = timedelta(minutes=10)
+
+
+@dataclass
+class DetectionContext:
+    """单条日志检测时的外部上下文，由 worker 从 ClickHouse/baseline 查好后传入。"""
+
+    seen_source: bool | None = None
+    baseline_deviations: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _is_sensitive(resource: str | None) -> bool:
@@ -48,7 +58,7 @@ class RuleEngine:
         self.known_login_ips: dict[str, set[str]] = defaultdict(set)
         self.new_ip_login_events: dict[str, Deque[tuple[datetime, str, str]]] = defaultdict(deque)
 
-    def evaluate_log(self, log: NormalizedLog) -> list[AnomalyEvent]:
+    def evaluate_log(self, log: NormalizedLog, context: DetectionContext | None = None) -> list[AnomalyEvent]:
         """评估单条日志，返回这条日志触发的所有异常事件。"""
 
         anomalies: list[AnomalyEvent] = []
@@ -59,7 +69,7 @@ class RuleEngine:
             anomalies.extend(self._handle_login_failed(log, ts))
 
         if log.action == "login" and log.result == "success":
-            anomalies.extend(self._handle_login_success(log, ts))
+            anomalies.extend(self._handle_login_success(log, ts, context))
 
         if log.action == "api_call":
             anomalies.extend(self._handle_api_call(log, ts))
@@ -148,13 +158,19 @@ class RuleEngine:
 
         return anomalies
 
-    def _handle_login_success(self, log: NormalizedLog, ts: datetime) -> list[AnomalyEvent]:
+    def _handle_login_success(
+        self,
+        log: NormalizedLog,
+        ts: datetime,
+        context: DetectionContext | None = None,
+    ) -> list[AnomalyEvent]:
         """处理登录成功相关规则：新 IP 登录、非工作时间登录。"""
 
         anomalies: list[AnomalyEvent] = []
         if log.user_id and log.src_ip:
             known = self.known_login_ips[log.user_id]
-            if log.src_ip not in known:
+            is_new_source = context.seen_source is False if context and context.seen_source is not None else log.src_ip not in known
+            if is_new_source:
                 # 第一次见到这个用户从该 IP 登录，记录下来供后续敏感访问关联。
                 known.add(log.src_ip)
                 self.new_ip_login_events[log.user_id].append((ts, log.src_ip, log.event_id))
@@ -164,8 +180,11 @@ class RuleEngine:
                         rule="新IP登录",
                         reason_codes=["new_source_ip"],
                         evidence={"user_id": log.user_id, "new_ip": log.src_ip},
+                        baseline_deviations=context.baseline_deviations if context else None,
                     )
                 )
+            else:
+                known.add(log.src_ip)
 
         if ts.hour < settings.work_hour_start or ts.hour >= settings.work_hour_end:
             anomalies.append(
@@ -277,9 +296,11 @@ class RuleEngine:
         evidence: dict,
         related_event_ids: list[str] | None = None,
         risk_component_overrides: dict[str, int] | None = None,
+        baseline_deviations: list[dict[str, Any]] | None = None,
     ) -> AnomalyEvent:
         """把规则命中信息交给 builder，生成标准异常事件。"""
 
+        seed = _event_id_seed(log, rule, reason_codes)
         return self.builder.build(
             log=log,
             rule_hits=[rule],
@@ -287,6 +308,8 @@ class RuleEngine:
             evidence=evidence,
             related_event_ids=related_event_ids,
             risk_component_overrides=risk_component_overrides,
+            baseline_deviations=baseline_deviations,
+            event_id_seed=seed,
         )
 
 
@@ -298,3 +321,16 @@ def detect_batch(logs: list[NormalizedLog], engine: RuleEngine | None = None) ->
     for log in sorted(logs, key=lambda x: x.event_time):
         anomalies.extend(engine.evaluate_log(log))
     return anomalies
+
+
+def _event_id_seed(log: NormalizedLog, rule: str, reason_codes: list[str]) -> str:
+    """根据源日志和规则生成稳定 seed，支持 worker 重扫时得到同一个异常 ID。"""
+
+    return "|".join(
+        [
+            log.tenant_id,
+            log.event_id,
+            ",".join(reason_codes),
+            rule,
+        ]
+    )

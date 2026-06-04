@@ -121,6 +121,29 @@ def test_baseline_deviations_are_preserved_and_increase_baseline_component() -> 
     assert event.risk_score == 60
 
 
+def test_event_id_seed_generates_stable_event_id() -> None:
+    """同一个 seed 应生成同一个异常 event_id，方便自动检测 worker 做幂等。"""
+
+    builder = AnomalyEventBuilder(clock=lambda: NOW)
+    first = builder.build(
+        log=build_log(),
+        rule_hits=["New source IP login"],
+        reason_codes=["new_source_ip"],
+        evidence={"user_id": "alice", "new_ip": "10.0.0.7"},
+        event_id_seed="default:evt-1:new_source_ip",
+    )
+    second = builder.build(
+        log=build_log(),
+        rule_hits=["New source IP login"],
+        reason_codes=["new_source_ip"],
+        evidence={"user_id": "alice", "new_ip": "10.0.0.7"},
+        event_id_seed="default:evt-1:new_source_ip",
+    )
+
+    assert first.event_id == second.event_id
+    assert first.event_id.startswith("anom-")
+
+
 def test_builder_requires_rule_hits_and_reason_codes() -> None:
     """异常事件必须同时有 rule_hits 和 reason_codes，缺少任意一个都报错。"""
 
