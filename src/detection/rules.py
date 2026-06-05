@@ -7,7 +7,9 @@ from __future__ import annotations
 """
 
 from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
 from typing import Deque
 
 from src.config import settings
@@ -21,6 +23,14 @@ SENSITIVE_KEYWORDS = ("export", "download", "admin", "/admin", "sensitive", "con
 WINDOW_1M = timedelta(minutes=1)
 WINDOW_5M = timedelta(minutes=5)
 WINDOW_10M = timedelta(minutes=10)
+
+
+@dataclass
+class DetectionContext:
+    """单条日志检测时的外部上下文，由 worker 从 ClickHouse/baseline 查好后传入。"""
+
+    seen_source: bool | None = None
+    baseline_deviations: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _is_sensitive(resource: str | None) -> bool:
@@ -48,24 +58,25 @@ class RuleEngine:
         self.known_login_ips: dict[str, set[str]] = defaultdict(set)
         self.new_ip_login_events: dict[str, Deque[tuple[datetime, str, str]]] = defaultdict(deque)
 
-    def evaluate_log(self, log: NormalizedLog) -> list[AnomalyEvent]:
+    def evaluate_log(self, log: NormalizedLog, context: DetectionContext | None = None) -> list[AnomalyEvent]:
         """评估单条日志，返回这条日志触发的所有异常事件。"""
 
+        context = context or DetectionContext()
         anomalies: list[AnomalyEvent] = []
         ts = log.event_time
 
         # 登录失败、登录成功、API 调用、敏感访问分别走不同规则。
         if log.action == "login" and log.result == "fail":
-            anomalies.extend(self._handle_login_failed(log, ts))
+            anomalies.extend(self._handle_login_failed(log, ts, context))
 
         if log.action == "login" and log.result == "success":
-            anomalies.extend(self._handle_login_success(log, ts))
+            anomalies.extend(self._handle_login_success(log, ts, context))
 
         if log.action == "api_call":
-            anomalies.extend(self._handle_api_call(log, ts))
+            anomalies.extend(self._handle_api_call(log, ts, context))
 
         if _is_sensitive(log.resource):
-            anomalies.extend(self._handle_sensitive_access(log, ts))
+            anomalies.extend(self._handle_sensitive_access(log, ts, context))
 
         # 普通用户访问 admin 资源，通常代表越权或敏感操作风险。
         if log.user_id and log.user_id != "admin" and log.resource and "admin" in log.resource.lower():
@@ -75,6 +86,7 @@ class RuleEngine:
                     rule="普通用户访问admin接口",
                     reason_codes=["admin_resource_access"],
                     evidence={"resource": log.resource, "user_id": log.user_id},
+                    baseline_deviations=context.baseline_deviations,
                 )
             )
 
@@ -88,12 +100,18 @@ class RuleEngine:
                         rule="系统日志出现error或critical",
                         reason_codes=["system_error_pattern"],
                         evidence={"message": log.message, "result": log.result},
+                        baseline_deviations=context.baseline_deviations,
                     )
                 )
 
         return anomalies
 
-    def _handle_login_failed(self, log: NormalizedLog, ts: datetime) -> list[AnomalyEvent]:
+    def _handle_login_failed(
+        self,
+        log: NormalizedLog,
+        ts: datetime,
+        context: DetectionContext,
+    ) -> list[AnomalyEvent]:
         """处理登录失败相关规则：同 IP 多次失败、同用户多次失败、同 IP 攻击多个用户。"""
 
         anomalies: list[AnomalyEvent] = []
@@ -110,6 +128,7 @@ class RuleEngine:
                         reason_codes=["failed_login_spike"],
                         evidence={"src_ip": log.src_ip, "failed_count_5m": len(q)},
                         risk_component_overrides={"rule_strength": 70},
+                        baseline_deviations=context.baseline_deviations,
                     )
                 )
 
@@ -124,6 +143,7 @@ class RuleEngine:
                         rule="同一user_id在5分钟内登录失败超阈值",
                         reason_codes=["failed_login_spike"],
                         evidence={"user_id": log.user_id, "failed_count_5m": len(uq)},
+                        baseline_deviations=context.baseline_deviations,
                     )
                 )
 
@@ -143,18 +163,25 @@ class RuleEngine:
                             "distinct_users_5m": sorted(unique_users),
                             "count": len(unique_users),
                         },
+                        baseline_deviations=context.baseline_deviations,
                     )
                 )
 
         return anomalies
 
-    def _handle_login_success(self, log: NormalizedLog, ts: datetime) -> list[AnomalyEvent]:
+    def _handle_login_success(
+        self,
+        log: NormalizedLog,
+        ts: datetime,
+        context: DetectionContext | None = None,
+    ) -> list[AnomalyEvent]:
         """处理登录成功相关规则：新 IP 登录、非工作时间登录。"""
 
         anomalies: list[AnomalyEvent] = []
         if log.user_id and log.src_ip:
             known = self.known_login_ips[log.user_id]
-            if log.src_ip not in known:
+            is_new_source = context.seen_source is False if context and context.seen_source is not None else log.src_ip not in known
+            if is_new_source:
                 # 第一次见到这个用户从该 IP 登录，记录下来供后续敏感访问关联。
                 known.add(log.src_ip)
                 self.new_ip_login_events[log.user_id].append((ts, log.src_ip, log.event_id))
@@ -164,8 +191,11 @@ class RuleEngine:
                         rule="新IP登录",
                         reason_codes=["new_source_ip"],
                         evidence={"user_id": log.user_id, "new_ip": log.src_ip},
+                        baseline_deviations=context.baseline_deviations if context else None,
                     )
                 )
+            else:
+                known.add(log.src_ip)
 
         if ts.hour < settings.work_hour_start or ts.hour >= settings.work_hour_end:
             anomalies.append(
@@ -174,11 +204,17 @@ class RuleEngine:
                     rule="非工作时间登录",
                     reason_codes=["rare_login_hour"],
                     evidence={"event_hour": ts.hour, "work_hours": f"{settings.work_hour_start}:00-{settings.work_hour_end}:00"},
+                    baseline_deviations=context.baseline_deviations if context else None,
                 )
             )
         return anomalies
 
-    def _handle_api_call(self, log: NormalizedLog, ts: datetime) -> list[AnomalyEvent]:
+    def _handle_api_call(
+        self,
+        log: NormalizedLog,
+        ts: datetime,
+        context: DetectionContext,
+    ) -> list[AnomalyEvent]:
         """处理 API 调用频率异常。"""
 
         anomalies: list[AnomalyEvent] = []
@@ -195,11 +231,17 @@ class RuleEngine:
                     rule="同一user_id在1分钟内API调用超阈值",
                     reason_codes=["high_api_rate"],
                     evidence={"user_id": log.user_id, "api_calls_1m": len(q)},
+                    baseline_deviations=context.baseline_deviations,
                 )
             )
         return anomalies
 
-    def _handle_sensitive_access(self, log: NormalizedLog, ts: datetime) -> list[AnomalyEvent]:
+    def _handle_sensitive_access(
+        self,
+        log: NormalizedLog,
+        ts: datetime,
+        context: DetectionContext,
+    ) -> list[AnomalyEvent]:
         """处理敏感资源访问，并尝试关联“新 IP 登录后访问敏感资源”的攻击链。"""
 
         anomalies: list[AnomalyEvent] = []
@@ -216,6 +258,7 @@ class RuleEngine:
                     rule="同一user_id在5分钟内敏感资源访问超阈值",
                     reason_codes=["sensitive_resource_access"],
                     evidence={"user_id": log.user_id, "sensitive_count_5m": len(q), "resource": log.resource},
+                    baseline_deviations=context.baseline_deviations,
                 )
             )
 
@@ -232,6 +275,7 @@ class RuleEngine:
                         reason_codes=["new_source_then_sensitive_access", "sensitive_resource_access"],
                         evidence={"user_id": log.user_id, "src_ip": log.src_ip, "resource": log.resource},
                         related_event_ids=[item[2] for item in recent],
+                        baseline_deviations=context.baseline_deviations,
                     )
                 )
                 # 如果敏感资源还是导出/下载接口，风险更像数据外泄。
@@ -243,6 +287,7 @@ class RuleEngine:
                             reason_codes=["new_source_then_sensitive_access", "download_volume_spike"],
                             evidence={"user_id": log.user_id, "resource": log.resource, "src_ip": log.src_ip},
                             related_event_ids=[item[2] for item in recent],
+                            baseline_deviations=context.baseline_deviations,
                         )
                     )
 
@@ -277,9 +322,11 @@ class RuleEngine:
         evidence: dict,
         related_event_ids: list[str] | None = None,
         risk_component_overrides: dict[str, int] | None = None,
+        baseline_deviations: list[dict[str, Any]] | None = None,
     ) -> AnomalyEvent:
         """把规则命中信息交给 builder，生成标准异常事件。"""
 
+        seed = _event_id_seed(log, rule, reason_codes)
         return self.builder.build(
             log=log,
             rule_hits=[rule],
@@ -287,6 +334,8 @@ class RuleEngine:
             evidence=evidence,
             related_event_ids=related_event_ids,
             risk_component_overrides=risk_component_overrides,
+            baseline_deviations=baseline_deviations,
+            event_id_seed=seed,
         )
 
 
@@ -298,3 +347,16 @@ def detect_batch(logs: list[NormalizedLog], engine: RuleEngine | None = None) ->
     for log in sorted(logs, key=lambda x: x.event_time):
         anomalies.extend(engine.evaluate_log(log))
     return anomalies
+
+
+def _event_id_seed(log: NormalizedLog, rule: str, reason_codes: list[str]) -> str:
+    """根据源日志和规则生成稳定 seed，支持 worker 重扫时得到同一个异常 ID。"""
+
+    return "|".join(
+        [
+            log.tenant_id,
+            log.event_id,
+            ",".join(reason_codes),
+            rule,
+        ]
+    )
