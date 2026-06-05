@@ -66,10 +66,11 @@ docker compose up --build
 | `kafka` | 流式传输和缓冲层 | `localhost:9092` |
 | `flink-jobmanager` / `flink-taskmanager` | Flink 运行环境 | `http://localhost:8081` |
 | `clickhouse` | 主存储和分析引擎 | `http://localhost:8123` |
-| `filebeat` | 采集 `logs/vpn_logs.log` 并写入 Kafka | 容器内运行 |
+| `filebeat` | 采集 `logs/*.log` 并写入 Kafka `raw_logs` | 容器内运行 |
+| `raw-to-parsed` | 轻量 Python 规范化器，`raw_logs -> parsed_logs`，让默认启动即可端到端入库 | 容器内运行 |
 | `backend` | FastAPI API 层 | `http://localhost:8000` |
 | `frontend` | React + Vite 工作台 | `http://localhost:5173` |
-| `log-generator` | 小规模持续生成 VPN syslog 样例 | 写入 `logs/vpn_logs.log` |
+| `log-generator` | 小规模持续生成多源日志样例 | 写入 `logs/` |
 
 默认日志生成器是小流量开发配置，避免压垮普通开发机。大规模日志生成不随默认启动运行，需要显式启用 profile：
 
@@ -77,7 +78,9 @@ docker compose up --build
 docker compose --profile scale up --build
 ```
 
-Flink 作业提交通过 Compose service 预留：
+默认启动用轻量 `raw-to-parsed` 服务把 `raw_logs` 规范化成 `parsed_logs`（ClickHouse 通过 Kafka 引擎表把 `parsed_logs` 落入 `security_logs`），因此 `docker compose up` 即可端到端入库，无需等待重型 PyFlink 镜像。
+
+Flink 是正式流处理器，通过 `jobs` profile 显式提交；它与 `raw-to-parsed` 都写 `parsed_logs`，由于 event_id 稳定，ClickHouse `ReplacingMergeTree` 会折叠重复：
 
 ```bash
 docker compose --profile jobs up flink-submit
