@@ -753,6 +753,60 @@ class ClickHouseStorage:
             "parse_error_count": 0,
         }
 
+    def security_logs_daily_counts(
+        self,
+        *,
+        metric_date: date,
+        tenant_id: str,
+        source_type: str,
+    ) -> dict[str, Any]:
+        """Real per-(date, source_type) counts straight from ClickHouse.
+
+        Unlike :meth:`security_log_quality_stats`, this does not depend on the
+        generator manifest's event_id list: it reports what actually landed in
+        ``security_logs`` so data-quality metrics reflect true pipeline output
+        rather than manifest-derived estimates.
+
+        ``clickhouse_insert_count`` is the raw row count (may include
+        not-yet-merged ReplacingMergeTree duplicates); ``parsed_logs_count`` is
+        the distinct event_id count of records that were successfully parsed and
+        persisted.
+        """
+        rows = self._select_dicts(
+            """
+            SELECT
+                count() AS clickhouse_insert_count,
+                uniqExact(event_id) AS parsed_logs_count,
+                countIf(log_type = 'parse_error' OR has(risk_tags, 'parse_error')) AS parse_error_count,
+                countIf(user_id = '') AS missing_user_id_count,
+                countIf(src_ip = '') AS missing_src_ip_count,
+                countIf(action = '') AS missing_action_count,
+                countIf(result = '') AS missing_result_count
+            FROM security_logs
+            WHERE event_date = {metric_date:Date}
+              AND tenant_id = {tenant_id:String}
+              AND source_type = {source_type:String}
+            """,
+            {"metric_date": metric_date, "tenant_id": tenant_id, "source_type": source_type},
+        )
+        default = {
+            "clickhouse_insert_count": 0,
+            "parsed_logs_count": 0,
+            "parse_error_count": 0,
+            "missing_event_time_count": 0,
+            "missing_user_id_count": 0,
+            "missing_src_ip_count": 0,
+            "missing_action_count": 0,
+            "missing_result_count": 0,
+        }
+        if not rows:
+            return default
+        merged = {**default, **rows[0]}
+        # event_time is non-nullable in the security_logs schema, so missing
+        # event_time is always zero here; keep the key for a stable contract.
+        merged["missing_event_time_count"] = 0
+        return merged
+
     def security_logs_table_size_bytes(self) -> int:
         value = self._select_scalar(
             """
@@ -786,15 +840,78 @@ class ClickHouseStorage:
             rows.extend(_baseline_rows_from_payload(payload))
         self.client.insert("ueba_user_baseline", rows, column_names=list(BASELINE_COLUMNS))
 
+    def aggregate_daily_features_sql(
+        self,
+        *,
+        metric_date: date,
+        tenant_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Aggregate one day of ``security_logs`` into per-user feature rows.
+
+        The grouping and counting run inside ClickHouse (``GROUP BY`` over a
+        single partition day) instead of streaming up to 100k raw rows into
+        Python, which is the scalable path under 1GB/day. The caller turns each
+        returned row into a ``ueba_user_daily_features`` record.
+        """
+        filters = ["event_date = {metric_date:Date}", "user_id != ''"]
+        parameters: dict[str, Any] = {"metric_date": metric_date}
+        if tenant_id is not None:
+            filters.append("tenant_id = {tenant_id:String}")
+            parameters["tenant_id"] = tenant_id
+        return self._select_dicts(
+            f"""
+            SELECT
+                tenant_id,
+                user_id,
+                topK(1)(account_type) AS account_type_top,
+                count() AS event_count,
+                countIf(action = 'login') AS login_count,
+                countIf(action = 'login' AND result = 'fail') AS failed_login_count,
+                countIf(action = 'login' AND result = 'success') AS success_login_count,
+                uniqExactIf(src_ip, src_ip != '') AS distinct_src_ip_count,
+                uniqExactIf(dst_ip, dst_ip != '') AS distinct_host_count,
+                uniqExactIf(action, action != '') AS distinct_action_count,
+                min(event_time) AS first_seen_time,
+                max(event_time) AS last_seen_time,
+                countIf(toHour(event_time) >= 22 OR toHour(event_time) < 6) AS night_event_count,
+                countIf(multiSearchAnyCaseInsensitive(action, ['download', 'export', 'admin', 'sensitive'])) AS sensitive_action_count,
+                countIf(multiSearchAnyCaseInsensitive(action, ['download', 'export'])) AS download_count,
+                countIf(multiSearchAnyCaseInsensitive(action, ['permission', 'grant', 'revoke', 'role'])) AS permission_change_count,
+                topK(5)(src_ip) AS common_src_ips_raw,
+                topK(5)(dst_ip) AS common_hosts_raw,
+                topK(5)(action) AS common_actions_raw
+            FROM security_logs
+            {_where(filters)}
+            GROUP BY tenant_id, user_id
+            """,
+            parameters,
+        )
+
     def insert_user_daily_features(self, rows: list[dict[str, Any]]) -> None:
         processed: list[list[Any]] = []
         now_dt = datetime.now(timezone.utc)
+        scopes: set[tuple[str, Any]] = set()
         for row in rows:
             row.setdefault("tenant_id", "default")
             row.setdefault("created_at", now_dt)
+            scopes.add((str(row.get("tenant_id")), row.get("feature_date")))
             processed.append([row.get(col) for col in DAILY_FEATURES_COLUMNS])
-        if processed:
-            self.client.insert("ueba_user_daily_features", processed, column_names=list(DAILY_FEATURES_COLUMNS))
+        if not processed:
+            return
+        # Idempotent rebuild: clear any prior rows for the (tenant, feature_date)
+        # pairs being written so repeated aggregation/backfill does not duplicate
+        # daily features.
+        for tenant_id, feature_date in scopes:
+            if feature_date is None:
+                continue
+            self.client.command(
+                """
+                ALTER TABLE ueba_user_daily_features
+                DELETE WHERE tenant_id = {tenant_id:String} AND feature_date = {feature_date:Date}
+                """,
+                parameters={"tenant_id": tenant_id, "feature_date": feature_date},
+            )
+        self.client.insert("ueba_user_daily_features", processed, column_names=list(DAILY_FEATURES_COLUMNS))
 
     def upsert_user_seen_sources(self, sources: list[dict[str, Any]]) -> None:
         processed: list[list[Any]] = []
@@ -885,6 +1002,9 @@ class ClickHouseStorage:
         anomaly_where = _where(
             [clause.replace("{", "{anom_") for clause in anomaly_filters]
         )
+        # baseline coverage and the latest report are scoped by tenant only; they
+        # are not bounded by the event_time window used for logs/anomalies.
+        tenant_clause = "WHERE tenant_id = {tenant_id:String}" if tenant_id is not None else ""
         row = self._select_dicts(
             f"""
             SELECT
@@ -900,7 +1020,14 @@ class ClickHouseStorage:
                     SELECT count()
                     FROM anomaly_events
                     {_where([*anomaly_filters, "risk_level = 'critical'"]).replace("{", "{anom_")}
-                ) AS critical_count
+                ) AS critical_count,
+                (
+                    SELECT count()
+                    FROM anomaly_events
+                    {_where([*anomaly_filters, "ai_status = 'pending'"]).replace("{", "{anom_")}
+                ) AS ai_pending_count,
+                (SELECT uniqExact(user_id) FROM ueba_user_baseline {tenant_clause}) AS baseline_user_count,
+                (SELECT max(report_date) FROM daily_security_reports {tenant_clause}) AS latest_report_date
             """,
             parameters,
         )
@@ -910,6 +1037,9 @@ class ClickHouseStorage:
             "anomaly_count": 0,
             "high_risk_count": 0,
             "critical_count": 0,
+            "ai_pending_count": 0,
+            "baseline_user_count": 0,
+            "latest_report_date": None,
         }
 
     def _select_scalar(

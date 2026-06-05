@@ -194,6 +194,38 @@ services:
         "${ANOMALY_DETECTOR_BATCH_SIZE:-1000}",
       ]
 
+  raw-to-parsed:
+    # Lightweight default normalizer so `docker compose up` ingests end-to-end
+    # without the heavy PyFlink build. Flink remains the formal stream processor
+    # and is enabled with `--profile jobs`; both write parsed_logs with stable
+    # event_id, so ClickHouse ReplacingMergeTree collapses any overlap.
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
+    container_name: log-ai-raw-to-parsed
+    restart: unless-stopped
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS_DOCKER:-kafka:9092}
+      KAFKA_RAW_TOPIC: ${KAFKA_RAW_TOPIC:-raw_logs}
+      KAFKA_PARSED_TOPIC: ${KAFKA_PARSED_TOPIC:-parsed_logs}
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    command:
+      - /bin/sh
+      - -c
+      - |
+        while true; do
+          python -m src.main process-raw \
+            --group-id "${RAW_TO_PARSED_GROUP_ID:-python-raw-to-parsed}" \
+            --idle-timeout-ms "${RAW_TO_PARSED_IDLE_TIMEOUT_MS:-10000}" || true
+          sleep "${RAW_TO_PARSED_RESTART_SECONDS:-2}"
+        done
+
   frontend:
     build:
       context: .
@@ -304,6 +336,7 @@ services:
       - ./src:/app/src:ro
       - ./tests:/app/tests:ro
       - ./sql:/app/sql:ro
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
     command: ["pytest", "-q"]
 
   elasticsearch:

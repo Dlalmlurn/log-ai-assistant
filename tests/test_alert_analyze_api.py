@@ -225,6 +225,72 @@ def test_analyze_alert_returns_standard_error_when_analysis_or_store_fails() -> 
     }
 
 
+class FeedbackTrackingStorage(FakeAnalyzeStorage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.feedback: list[Any] = []
+
+    def insert_feedback(self, feedback) -> None:
+        self.feedback.append(feedback)
+
+
+class SuggestingAnalyzer(FakeAnalyzer):
+    def analyze(self, **kwargs) -> AIJudgement:
+        report = super().analyze(**kwargs)
+        return report.model_copy(
+            update={
+                "feedback_suggestions": {
+                    "rule_weight": "Raise weight for new-source-then-sensitive rule.",
+                    "false_positive": {
+                        "suggestion": "Looks legitimate for a service account.",
+                        "confidence": 0.4,
+                    },
+                }
+            }
+        )
+
+
+def test_analyze_alert_splits_feedback_suggestions_into_ai_feedback() -> None:
+    storage = FeedbackTrackingStorage()
+
+    analyze_alert(event_id="anom-1", storage=storage, analyzer=SuggestingAnalyzer())
+
+    assert len(storage.feedback) == 2
+    by_type = {fb.feedback_type: fb for fb in storage.feedback}
+    assert set(by_type) == {"rule_weight", "false_positive"}
+    rule_fb = by_type["rule_weight"]
+    assert rule_fb.target_component == "rule"
+    assert rule_fb.review_status == "pending"
+    assert rule_fb.event_id == "anom-1"
+    assert rule_fb.judgement_id == "ai-1"
+    fp_fb = by_type["false_positive"]
+    assert fp_fb.target_component == "scoring"
+    assert fp_fb.confidence == 0.4
+    assert fp_fb.suggestion == "Looks legitimate for a service account."
+
+
+def test_analyze_alert_rejects_non_candidate_anomaly() -> None:
+    storage = FakeAnalyzeStorage()
+    storage.anomaly = {**ALERT_DOC, "risk_level": "low", "ai_status": "not_required"}
+
+    with pytest.raises(HTTPException) as exc_info:
+        analyze_alert(event_id="anom-1", storage=storage, analyzer=FakeAnalyzer())
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "ai_judgement_not_candidate"
+    assert exc_info.value.detail["details"]["risk_level"] == "low"
+
+
+def test_analyze_alert_force_overrides_candidate_gate() -> None:
+    storage = FakeAnalyzeStorage()
+    storage.anomaly = {**ALERT_DOC, "risk_level": "low", "ai_status": "not_required"}
+
+    response = analyze_alert(event_id="anom-1", force=True, storage=storage, analyzer=FakeAnalyzer())
+
+    assert response.judgement_id == "ai-1"
+    assert storage.updated == [{"event_id": "anom-1", "ai_status": "analyzed"}]
+
+
 def test_analyze_alert_openapi_binds_contract_and_error_shape() -> None:
     operation = app.openapi()["paths"]["/api/v1/ai/judge/{event_id}"]["post"]
 

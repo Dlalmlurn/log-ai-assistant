@@ -351,6 +351,11 @@ class StatsOverviewResponse(BaseModel):
     anomaly_count: int = Field(default=0, ge=0)
     high_risk_count: int = Field(default=0, ge=0)
     critical_count: int = Field(default=0, ge=0)
+    # Workbench health: AI judgement backlog, baseline coverage, and whether a
+    # daily report has been generated yet.
+    ai_pending_count: int = Field(default=0, ge=0)
+    baseline_user_count: int = Field(default=0, ge=0)
+    latest_report_date: date | None = None
 
 
 class UserRiskStats(BaseModel):

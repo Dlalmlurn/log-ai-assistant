@@ -54,38 +54,63 @@ def build_data_quality_metrics(
     created_at = datetime.now(timezone.utc)
     metrics: list[DataQualityMetric] = []
 
+    use_real_counts = hasattr(storage, "security_logs_daily_counts")
+
     for (tenant_id, source_type), items in grouped.items():
-        event_ids = [str(item["event_id"]) for item in items if item.get("event_id")]
-        stats = storage.security_log_quality_stats(event_ids)
+        resolved_date = metric_date or _manifest_metric_date(items)
         generated_count = len(items)
-        security_logs_count = int(stats.get("security_logs_count") or 0)
         raw_size_bytes = sum(int(item.get("raw_size_bytes") or 0) for item in items)
-        parse_error_count = int(stats.get("parse_error_count") or 0)
         injected_labels = [
             str(item.get("injected_label") or "")
             for item in items
             if str(item.get("injected_label") or "") not in {"", "normal"}
         ]
+
+        if use_real_counts:
+            # Real per-stage counts straight from ClickHouse for this (date, source).
+            stats = storage.security_logs_daily_counts(
+                metric_date=resolved_date,
+                tenant_id=tenant_id,
+                source_type=source_type,
+            )
+            clickhouse_insert_count = int(stats.get("clickhouse_insert_count") or 0)
+            parsed_logs_count = int(stats.get("parsed_logs_count") or 0)
+            security_logs_count = parsed_logs_count
+            parse_error_count = int(stats.get("parse_error_count") or 0)
+            missing_denominator = clickhouse_insert_count
+            parse_error_denominator = clickhouse_insert_count or generated_count
+        else:
+            # Fallback: estimate from the manifest event_id list (no ClickHouse
+            # date-scoped count available, e.g. older storage adapters).
+            event_ids = [str(item["event_id"]) for item in items if item.get("event_id")]
+            stats = storage.security_log_quality_stats(event_ids)
+            security_logs_count = int(stats.get("security_logs_count") or 0)
+            parsed_logs_count = security_logs_count
+            clickhouse_insert_count = security_logs_count
+            parse_error_count = int(stats.get("parse_error_count") or 0)
+            missing_denominator = security_logs_count
+            parse_error_denominator = generated_count
+
         metric = DataQualityMetric(
-            metric_date=metric_date or _manifest_metric_date(items),
+            metric_date=resolved_date,
             tenant_id=tenant_id,
             source_type=source_type,
             generated_count=generated_count,
             injected_anomaly_count=len(injected_labels),
             injected_high_risk_count=sum(_is_high_risk_label(label) for label in injected_labels),
             raw_logs_count=_raw_line_count(items),
-            parsed_logs_count=security_logs_count,
-            clickhouse_insert_count=security_logs_count,
+            parsed_logs_count=parsed_logs_count,
+            clickhouse_insert_count=clickhouse_insert_count,
             security_logs_count=security_logs_count,
             raw_size_bytes=raw_size_bytes,
             table_size_bytes=table_size,
             compression_ratio=round(raw_size_bytes / table_size, 4) if table_size else 0,
-            missing_event_time_rate=_rate(stats.get("missing_event_time_count"), security_logs_count),
-            missing_user_id_rate=_rate(stats.get("missing_user_id_count"), security_logs_count),
-            missing_src_ip_rate=_rate(stats.get("missing_src_ip_count"), security_logs_count),
-            missing_action_rate=_rate(stats.get("missing_action_count"), security_logs_count),
-            missing_result_rate=_rate(stats.get("missing_result_count"), security_logs_count),
-            parse_error_rate=_rate(parse_error_count, generated_count),
+            missing_event_time_rate=_rate(stats.get("missing_event_time_count"), missing_denominator),
+            missing_user_id_rate=_rate(stats.get("missing_user_id_count"), missing_denominator),
+            missing_src_ip_rate=_rate(stats.get("missing_src_ip_count"), missing_denominator),
+            missing_action_rate=_rate(stats.get("missing_action_count"), missing_denominator),
+            missing_result_rate=_rate(stats.get("missing_result_count"), missing_denominator),
+            parse_error_rate=_rate(parse_error_count, parse_error_denominator),
             created_at=created_at,
         )
         metrics.append(metric)

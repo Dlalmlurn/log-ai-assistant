@@ -17,6 +17,13 @@ from pyflink.datastream.connectors.kafka import (
     KafkaSource,
 )
 
+try:
+    # Available on pyflink 1.18; lets committed_offsets() fall back to earliest
+    # when the consumer group has no committed position yet.
+    from pyflink.datastream.connectors.kafka import KafkaOffsetResetStrategy
+except ImportError:  # pragma: no cover - depends on pyflink build
+    KafkaOffsetResetStrategy = None
+
 # Make src importable when running with `flink run -py`
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_DIR.parent
@@ -28,7 +35,10 @@ from src.parser.log_parser import normalize_raw_record  # noqa: E402
 
 def to_parsed_json(raw: str) -> str:
     try:
-        normalized = normalize_raw_record(raw, source_type_hint="vpn")
+        # The Filebeat envelope carries source_type for all 7 log families; the
+        # hint is only used when the envelope omits it. Default to "system" so a
+        # missing source_type never silently mislabels a record as VPN.
+        normalized = normalize_raw_record(raw, source_type_hint="system")
         return json.dumps(normalized.model_dump(mode="json"), ensure_ascii=False)
     except Exception as exc:
         err = {
@@ -53,12 +63,23 @@ def run_job(bootstrap_servers: str, raw_topic: str, parsed_topic: str, group_id:
     env.set_parallelism(1)
     env.enable_checkpointing(10000)
 
+    # Resume from the consumer group's committed offsets so a restart does not
+    # re-process the whole topic. When the group has no committed offset yet
+    # (first submit, or Filebeat wrote before Flink was submitted), fall back to
+    # EARLIEST instead of LATEST so already-buffered raw_logs are not skipped.
+    if KafkaOffsetResetStrategy is not None:
+        starting_offsets = KafkaOffsetsInitializer.committed_offsets(
+            KafkaOffsetResetStrategy.EARLIEST
+        )
+    else:  # pragma: no cover - depends on pyflink build
+        starting_offsets = KafkaOffsetsInitializer.earliest()
+
     source = (
         KafkaSource.builder()
         .set_bootstrap_servers(bootstrap_servers)
         .set_topics(raw_topic)
         .set_group_id(group_id)
-        .set_starting_offsets(KafkaOffsetsInitializer.latest())
+        .set_starting_offsets(starting_offsets)
         .set_value_only_deserializer(SimpleStringSchema())
         .build()
     )

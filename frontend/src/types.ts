@@ -148,6 +148,9 @@ export type StatsOverview = {
   anomaly_count: number;
   high_risk_count: number;
   critical_count: number;
+  ai_pending_count: number;
+  baseline_user_count: number;
+  latest_report_date: string | null;
 };
 
 export type UserRiskStats = {
