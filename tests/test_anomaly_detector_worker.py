@@ -39,9 +39,11 @@ class FakeStorage:
         self,
         logs: list[dict[str, Any]],
         seen_sources: set[tuple[str, str, str, str]] | None = None,
+        baselines: dict[tuple[str, str], dict[str, Any]] | None = None,
     ) -> None:
         self.logs = logs
         self.seen_sources = seen_sources or set()
+        self.baselines = baselines or {}
         self.list_calls: list[dict[str, Any]] = []
         self.inserted_batches: list[list[AnomalyEvent]] = []
         self.upserted_sources: list[dict[str, Any]] = []
@@ -96,6 +98,9 @@ class FakeStorage:
                     str(item.get("source_key") or ""),
                 )
             )
+
+    def get_user_baseline(self, user_id: str, *, tenant_id: str | None = None, baseline_date=None):
+        return self.baselines.get((tenant_id or "default", user_id))
 
 
 def test_worker_run_once_inserts_detected_anomalies_and_advances_checkpoint() -> None:
@@ -237,3 +242,52 @@ def test_worker_records_new_seen_source_after_new_source_login_anomaly() -> None
             "seen_count": 1,
         }
     ]
+
+
+def test_worker_attaches_baseline_deviations_to_rule_anomaly() -> None:
+    logs = [
+        build_log(
+            1,
+            action="access",
+            result="success",
+            src_ip="10.0.0.7",
+            resource="/api/admin/export",
+            message="admin export",
+        )
+    ]
+    storage = FakeStorage(
+        logs,
+        seen_sources={("default", "alice", "ip", "10.0.0.7")},
+        baselines={
+            ("default", "alice"): {
+                "tenant_id": "default",
+                "user_id": "alice",
+                "location_profile": {"common_ips": ["10.0.0.7"]},
+                "time_profile": {"active_hours": ["09:00-18:00"]},
+                "access_profile": {"common_resources": ["/home"]},
+                "result_profile": {},
+            }
+        },
+    )
+    worker = AnomalyDetectorWorker(
+        storage=storage,
+        lookback_minutes=5,
+        batch_size=100,
+        clock=lambda: BASE_TIME + timedelta(minutes=1),
+    )
+
+    summary = worker.run_once()
+
+    assert summary.anomalies_detected == 1
+    anomaly = storage.inserted_batches[0][0]
+    assert anomaly.reason_codes == ["admin_resource_access"]
+    assert anomaly.baseline_deviations == [
+        {
+            "feature": "resource",
+            "expected": ["/home"],
+            "actual": "/api/admin/export",
+            "severity": "high",
+            "reason": "outside_baseline_common_resources",
+        }
+    ]
+    assert anomaly.risk_components["baseline_deviation"] == 25
