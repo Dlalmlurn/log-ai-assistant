@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import date as Date, datetime, timedelta, timezone
 from threading import Lock
@@ -357,6 +358,10 @@ def get_alert_detail(
 )
 def analyze_alert(
     event_id: str,
+    # Plain bool default (not Query(...)) so direct callers get a real False;
+    # FastAPI still exposes it as a `force` query parameter. Setting it overrides
+    # the high/critical candidate gate and judges the anomaly anyway.
+    force: bool = False,
     storage: ClickHouseStorage = Depends(get_storage),
     analyzer: AIAnalyzer = Depends(get_analyzer),
 ) -> AIJudgement:
@@ -382,6 +387,23 @@ def analyze_alert(
             },
         )
 
+    # Candidate gate: the LLM only judges high-suspicion events (baseline rule:
+    # "LLM 只处理高可疑事件的结构化证据包"). Allow high/critical risk or events
+    # already queued (ai_status == pending); `force=true` overrides for re-runs.
+    if not force and not _is_ai_judgement_candidate(alert):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "ai_judgement_not_candidate",
+                "message": "Anomaly is not an AI judgement candidate; only high/critical or pending events are analyzed. Pass force=true to override.",
+                "details": {
+                    "event_id": event_id,
+                    "risk_level": str(alert.get("risk_level") or "unknown"),
+                    "ai_status": str(alert.get("ai_status") or "not_required"),
+                },
+            },
+        )
+
     try:
         baseline = _fetch_alert_baseline(storage, alert)
         related_logs = _fetch_related_logs(storage, alert)
@@ -393,6 +415,10 @@ def analyze_alert(
         )
         storage.insert_ai_judgement(report)
         storage.update_anomaly_ai_status(event_id, "analyzed")
+        # Close the AI feedback loop: structured suggestions from the judgement
+        # become pending ai_feedback rows (REQ-004). Best-effort so an enrichment
+        # failure never voids an already-stored judgement.
+        _store_ai_feedback_suggestions(storage, report, alert)
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -852,6 +878,133 @@ def _fetch_ai_report(storage: ClickHouseStorage, alert: dict[str, Any]) -> dict[
         return {}
 
     return storage.get_latest_ai_judgement(str(event_id)) or {}
+
+
+# A judgement candidate is a high-suspicion event the LLM is allowed to analyze.
+AI_CANDIDATE_RISK_LEVELS = {"high", "critical"}
+
+# Map an AI-suggested feedback_type to the component the feedback targets.
+FEEDBACK_TYPE_TO_COMPONENT: dict[str, str] = {
+    "rule_weight": "rule",
+    "baseline_threshold": "baseline",
+    "false_positive": "scoring",
+    "new_pattern": "rule",
+    "data_contract": "data_contract",
+}
+VALID_FEEDBACK_TARGETS = {"rule", "baseline", "scoring", "data_contract"}
+
+
+def _is_ai_judgement_candidate(alert: dict[str, Any]) -> bool:
+    risk_level = str(alert.get("risk_level") or "").lower()
+    ai_status = str(alert.get("ai_status") or "").lower()
+    return risk_level in AI_CANDIDATE_RISK_LEVELS or ai_status == "pending"
+
+
+def _store_ai_feedback_suggestions(
+    storage: ClickHouseStorage,
+    report: AIJudgement,
+    alert: dict[str, Any],
+) -> None:
+    """Turn a judgement's structured feedback_suggestions into ai_feedback rows.
+
+    Feedback is recorded as ``pending`` for later human review; it never mutates
+    rules or baselines automatically (REQ-004). Best-effort: any failure here is
+    swallowed so a successfully stored judgement is still returned.
+    """
+    suggestions = getattr(report, "feedback_suggestions", None)
+    if not suggestions:
+        return
+    insert = getattr(storage, "insert_feedback", None)
+    if insert is None:
+        return
+    try:
+        for feedback in _build_ai_feedback_rows(report, alert, suggestions):
+            insert(feedback)
+    except Exception:
+        # Enrichment only; the judgement is already persisted and returned.
+        return
+
+
+def _build_ai_feedback_rows(
+    report: AIJudgement,
+    alert: dict[str, Any],
+    suggestions: Any,
+) -> list[AIFeedback]:
+    if isinstance(suggestions, dict):
+        items: list[tuple[str | None, Any]] = list(suggestions.items())
+    elif isinstance(suggestions, list):
+        items = [(None, entry) for entry in suggestions]
+    else:
+        return []
+
+    rows: list[AIFeedback] = []
+    for key, value in items:
+        feedback = _coerce_ai_feedback(report, alert, key, value)
+        if feedback is not None:
+            rows.append(feedback)
+    return rows
+
+
+def _coerce_ai_feedback(
+    report: AIJudgement,
+    alert: dict[str, Any],
+    key: str | None,
+    value: Any,
+) -> AIFeedback | None:
+    detail = value if isinstance(value, dict) else {}
+
+    feedback_type = _resolve_feedback_type(key, detail)
+    target_component = _resolve_feedback_target(detail, feedback_type)
+    suggestion = _resolve_feedback_suggestion(key, value, detail)
+    if not suggestion:
+        return None
+    confidence = detail.get("confidence", report.confidence)
+    try:
+        confidence = max(0.0, min(1.0, float(confidence)))
+    except (TypeError, ValueError):
+        confidence = report.confidence
+
+    return AIFeedback(
+        feedback_id=f"fb-ai-{uuid.uuid4()}",
+        event_id=report.event_id,
+        judgement_id=report.judgement_id,
+        tenant_id=str(alert.get("tenant_id") or "default"),
+        user_id=alert.get("user_id"),
+        feedback_type=feedback_type,
+        suggestion=suggestion,
+        target_component=target_component,
+        confidence=confidence,
+        review_status="pending",
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+def _resolve_feedback_type(key: str | None, detail: dict[str, Any]) -> str:
+    candidate = str(detail.get("feedback_type") or key or "").strip()
+    if candidate in FEEDBACK_TYPE_TO_COMPONENT:
+        return candidate
+    return "new_pattern"
+
+
+def _resolve_feedback_target(detail: dict[str, Any], feedback_type: str) -> str:
+    candidate = str(detail.get("target_component") or "").strip()
+    if candidate in VALID_FEEDBACK_TARGETS:
+        return candidate
+    return FEEDBACK_TYPE_TO_COMPONENT.get(feedback_type, "rule")
+
+
+def _resolve_feedback_suggestion(key: str | None, value: Any, detail: dict[str, Any]) -> str:
+    if detail:
+        text = detail.get("suggestion")
+        if text:
+            return str(text)
+        return json.dumps(detail, ensure_ascii=False)
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    prefix = f"{key}: " if key else ""
+    return f"{prefix}{value}"
 
 
 def _build_evidence_chain(alert: dict[str, Any], baseline: dict[str, Any], related_logs: list[dict[str, Any]]) -> EvidenceChain:

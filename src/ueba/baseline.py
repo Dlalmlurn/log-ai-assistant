@@ -10,10 +10,10 @@ from src.schemas import UserBaseline
 from src.storage import ClickHouseStorage
 from src.storage.clickhouse_client import DAILY_FEATURES_COLUMNS
 
+# Used by build_baselines_from_logs (the raw-log fallback path). The daily
+# feature aggregation now computes night/sensitive/download/permission counts
+# inside ClickHouse (see ClickHouseStorage.aggregate_daily_features_sql).
 SENSITIVE_HINTS = ("download", "export", "admin", "sensitive")
-PERMISSION_HINTS = ("permission", "grant", "revoke", "role")
-DOWNLOAD_HINTS = ("download", "export")
-NIGHT_HOURS = frozenset(range(22, 24)) | frozenset(range(0, 6))
 
 
 def _ip_prefix(ip: str | None) -> str:
@@ -33,129 +33,85 @@ def aggregate_daily_features(
     storage: ClickHouseStorage,
     target_date: datetime | None = None,
 ) -> int:
+    """Aggregate one day of ``security_logs`` into per-user daily features.
+
+    The heavy per-log grouping is pushed into ClickHouse via
+    :meth:`ClickHouseStorage.aggregate_daily_features_sql`; this function only
+    shapes the small per-user aggregate rows into feature records. This avoids
+    pulling up to 100k raw logs into Python and scales to 1GB/day.
+    """
     if target_date is None:
         target_date = datetime.now(timezone.utc) - timedelta(days=1)
 
     if isinstance(target_date, datetime):
         date_val = target_date.date()
-        start_dt = datetime.combine(date_val, datetime.min.time(), tzinfo=timezone.utc)
-        end_dt = datetime.combine(date_val, datetime.max.time(), tzinfo=timezone.utc)
+        day_start = datetime.combine(date_val, datetime.min.time(), tzinfo=timezone.utc)
     else:
-        start_dt = target_date
-        end_dt = target_date + timedelta(days=1)
-        date_val = start_dt.date() if hasattr(start_dt, "date") else start_dt
+        date_val = target_date.date() if hasattr(target_date, "date") else target_date
+        day_start = datetime.combine(date_val, datetime.min.time(), tzinfo=timezone.utc)
 
-    logs, _total = storage.list_logs(
-        start_time=start_dt,
-        end_time=end_dt,
-        limit=100000,
-        offset=0,
-    )
-
-    if not logs:
+    aggregates = storage.aggregate_daily_features_sql(metric_date=date_val)
+    if not aggregates:
         return 0
 
-    by_user: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for log in logs:
-        uid = log.get("user_id")
-        if uid:
-            by_user[str(uid)].append(log)
-
+    now_dt = datetime.now(timezone.utc)
     rows: list[dict[str, Any]] = []
-    seen_by_user: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for agg in aggregates:
+        event_count = int(agg.get("event_count") or 0)
+        common_src_ips = _non_empty_top(agg.get("common_src_ips_raw"), 5)
+        common_hosts = _non_empty_top(agg.get("common_hosts_raw"), 5)
+        common_actions = _non_empty_top(agg.get("common_actions_raw"), 5)
+        account_type_top = _non_empty_top(agg.get("account_type_top"), 1)
+        night_count = int(agg.get("night_event_count") or 0)
+        sensitive_count = int(agg.get("sensitive_action_count") or 0)
 
-    for user_id, user_logs in by_user.items():
-        event_times: list[datetime] = []
-        src_ips: Counter[str] = Counter()
-        hosts: Counter[str] = Counter()
-        actions: Counter[str] = Counter()
-        night_count = 0
-        sensitive_count = 0
-        download_count = 0
-        permission_count = 0
-        login_count = 0
-        failed_login = 0
-        success_login = 0
-        account_types: Counter[str] = Counter()
-
-        for log in user_logs:
-            et = log.get("event_time")
-            dt = _to_dt(et) if isinstance(et, str) else et
-            if isinstance(dt, datetime):
-                event_times.append(dt)
-                if dt.hour in NIGHT_HOURS:
-                    night_count += 1
-
-            if log.get("src_ip"):
-                ip = str(log["src_ip"])
-                src_ips[ip] += 1
-                prefixes: set[str] = set()
-                for ip_val in src_ips:
-                    prefixes.add(_ip_prefix(ip_val))
-
-            if log.get("dst_ip"):
-                hosts[str(log["dst_ip"])] += 1
-
-            action = str(log.get("action") or "")
-            if action:
-                actions[action] += 1
-                action_lower = action.lower()
-                if any(k in action_lower for k in SENSITIVE_HINTS):
-                    sensitive_count += 1
-                if any(k in action_lower for k in DOWNLOAD_HINTS):
-                    download_count += 1
-                if any(k in action_lower for k in PERMISSION_HINTS):
-                    permission_count += 1
-                if action_lower == "login":
-                    login_count += 1
-                    result = str(log.get("result") or "").lower()
-                    if result == "fail":
-                        failed_login += 1
-                    elif result == "success":
-                        success_login += 1
-
-            if log.get("account_type"):
-                account_types[str(log["account_type"])] += 1
-
-        account_type = _top_n_items(account_types, 1)
-
-        row: dict[str, Any] = {
+        rows.append({
             "feature_date": date_val,
-            "tenant_id": str(user_logs[0].get("tenant_id") or "default"),
-            "user_id": user_id,
-            "account_type": account_type[0] if account_type else "unknown",
-            "login_count": login_count,
-            "failed_login_count": failed_login,
-            "success_login_count": success_login,
-            "distinct_src_ip_count": len(src_ips),
-            "distinct_host_count": len(hosts),
-            "distinct_action_count": len(actions),
-            "first_seen_time": min(event_times) if event_times else start_dt,
-            "last_seen_time": max(event_times) if event_times else start_dt,
+            "tenant_id": str(agg.get("tenant_id") or "default"),
+            "user_id": str(agg.get("user_id")),
+            "account_type": account_type_top[0] if account_type_top else "unknown",
+            "login_count": int(agg.get("login_count") or 0),
+            "failed_login_count": int(agg.get("failed_login_count") or 0),
+            "success_login_count": int(agg.get("success_login_count") or 0),
+            "distinct_src_ip_count": int(agg.get("distinct_src_ip_count") or 0),
+            "distinct_host_count": int(agg.get("distinct_host_count") or 0),
+            "distinct_action_count": int(agg.get("distinct_action_count") or 0),
+            "first_seen_time": agg.get("first_seen_time") or day_start,
+            "last_seen_time": agg.get("last_seen_time") or day_start,
             "night_event_count": night_count,
             "sensitive_action_count": sensitive_count,
-            "download_count": download_count,
-            "permission_change_count": permission_count,
+            "download_count": int(agg.get("download_count") or 0),
+            "permission_change_count": int(agg.get("permission_change_count") or 0),
             "new_source_count": 0,
             "maintenance_window_hit_count": 0,
-            "common_src_ips": _top_n_items(src_ips, 5),
-            "common_ip_prefixes": _top_n_items(Counter({p: 1 for p in {_ip_prefix(ip) for ip in src_ips}}), 5),
-            "common_hosts": _top_n_items(hosts, 5),
-            "common_actions": _top_n_items(actions, 5),
+            "common_src_ips": common_src_ips,
+            # Prefixes are derived from the top source IPs; cheap and good enough
+            # for baseline location profiling without a second aggregation pass.
+            "common_ip_prefixes": _top_n_items(
+                Counter({p: 1 for p in {_ip_prefix(ip) for ip in common_src_ips}}), 5
+            ),
+            "common_hosts": common_hosts,
+            "common_actions": common_actions,
             "profile_metrics": json.dumps({
-                "unique_src_ips": len(src_ips),
-                "unique_hosts": len(hosts),
-                "unique_actions": len(actions),
-                "night_ratio": round(night_count / len(user_logs), 4) if user_logs else 0,
-                "sensitive_ratio": round(sensitive_count / len(user_logs), 4) if user_logs else 0,
+                "unique_src_ips": int(agg.get("distinct_src_ip_count") or 0),
+                "unique_hosts": int(agg.get("distinct_host_count") or 0),
+                "unique_actions": int(agg.get("distinct_action_count") or 0),
+                "night_ratio": round(night_count / event_count, 4) if event_count else 0,
+                "sensitive_ratio": round(sensitive_count / event_count, 4) if event_count else 0,
             }),
-            "created_at": datetime.now(timezone.utc),
-        }
-        rows.append(row)
+            "created_at": now_dt,
+        })
 
-    if rows:
-        storage.insert_user_daily_features(rows)
+    storage.insert_user_daily_features(rows)
     return len(rows)
+
+
+def _non_empty_top(values: Any, n: int) -> list[str]:
+    """Filter empty strings out of a ClickHouse topK array and cap to ``n``."""
+    if not isinstance(values, (list, tuple)):
+        return []
+    result = [str(item) for item in values if item is not None and str(item) != ""]
+    return result[:n]
 
 
 def aggregate_daily_features_batch(

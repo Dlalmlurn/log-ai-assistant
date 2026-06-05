@@ -329,6 +329,27 @@ function SystemStatusPage() {
         />
       </div>
 
+      <div className="metrics-band">
+        <Metric
+          icon={Brain}
+          label="AI pending"
+          value={formatNumber(statsState.data?.ai_pending_count)}
+          hint="Anomalies awaiting AI judgement"
+        />
+        <Metric
+          icon={UserRound}
+          label="Baseline coverage"
+          value={formatNumber(statsState.data?.baseline_user_count)}
+          hint="Users with a stored behavior baseline"
+        />
+        <Metric
+          icon={FileText}
+          label="Latest daily report"
+          value={statsState.data?.latest_report_date ?? "none"}
+          hint="Most recent daily_security_reports date"
+        />
+      </div>
+
       {statsState.error ? <ErrorBanner message={statsState.error} /> : null}
 
       <div className="section-title">
@@ -1197,15 +1218,19 @@ function UserProfilesPage() {
               <span>{profile.sample_count} samples</span>
               <span>{profile.fallback_level ?? "none"}</span>
             </div>
-            <div className="profile-sections">
-              <ProfileSection title="Who" value={profile.who_profile} />
-              <ProfileSection title="Time" value={profile.time_profile} />
-              <ProfileSection title="Location" value={profile.location_profile} />
-              <ProfileSection title="Access" value={profile.access_profile} />
-              <ProfileSection title="Volume" value={profile.volume_profile} />
-              <ProfileSection title="Result" value={profile.result_profile} />
-              <ProfileSection title="Why" value={profile.why_profile} />
-            </div>
+            <FiveW1HSections profile={profile} />
+            <details className="profile-raw">
+              <summary>Raw profiles (debug)</summary>
+              <div className="profile-sections">
+                <ProfileSection title="who_profile" value={profile.who_profile} />
+                <ProfileSection title="time_profile" value={profile.time_profile} />
+                <ProfileSection title="location_profile" value={profile.location_profile} />
+                <ProfileSection title="access_profile" value={profile.access_profile} />
+                <ProfileSection title="volume_profile" value={profile.volume_profile} />
+                <ProfileSection title="result_profile" value={profile.result_profile} />
+                <ProfileSection title="why_profile" value={profile.why_profile} />
+              </div>
+            </details>
           </article>
         ))}
         {!state.loading && state.data?.items.length === 0 ? <EmptyState title="No user profiles" detail="No baseline records are available yet." /> : null}
@@ -1228,6 +1253,109 @@ function ProfileSection({ title, value }: { title: string; value: Record<string,
       <JsonBlock value={value} />
     </section>
   );
+}
+
+type ProfileFeature = { name: string; display: string };
+
+// Keyword routing: access_profile feeds both "What" (resources/actions) and
+// "How" (device/agent/auth/protocol); these names go to How, the rest to What.
+const HOW_FEATURE_HINTS = ["agent", "auth", "device", "protocol"];
+
+function FiveW1HSections({ profile }: { profile: UserBaseline }) {
+  const access = flattenProfileFeatures(profile.access_profile);
+  const howFromAccess = access.filter((feature) =>
+    HOW_FEATURE_HINTS.some((hint) => feature.name.toLowerCase().includes(hint))
+  );
+  const whatFromAccess = access.filter((feature) => !howFromAccess.includes(feature));
+
+  const dimensions: Array<{ key: string; title: string; subtitle: string; icon: typeof Activity; items: ProfileFeature[] }> = [
+    { key: "who", title: "Who", subtitle: "User, role, department, account type", icon: UserRound, items: flattenProfileFeatures(profile.who_profile) },
+    { key: "when", title: "When", subtitle: "Active hours and weekdays", icon: Clock3, items: flattenProfileFeatures(profile.time_profile) },
+    { key: "where", title: "Where", subtitle: "Common IPs and locations", icon: RadioTower, items: flattenProfileFeatures(profile.location_profile) },
+    {
+      key: "what",
+      title: "What",
+      subtitle: "Resources, actions, volume and outcomes",
+      icon: ListFilter,
+      items: [...whatFromAccess, ...flattenProfileFeatures(profile.volume_profile), ...flattenProfileFeatures(profile.result_profile)]
+    },
+    { key: "why", title: "Why", subtitle: "Business context and resource purpose", icon: Sparkles, items: flattenProfileFeatures(profile.why_profile) },
+    { key: "how", title: "How", subtitle: "Device, user-agent and auth method", icon: Server, items: howFromAccess }
+  ];
+
+  return (
+    <div className="w1h-grid">
+      {dimensions.map(({ key, title, subtitle, icon: Icon, items }) => (
+        <section key={key} className="w1h-card">
+          <header className="w1h-card-head">
+            <Icon aria-hidden="true" />
+            <div>
+              <h3>{title}</h3>
+              <span>{subtitle}</span>
+            </div>
+          </header>
+          {items.length > 0 ? (
+            <dl className="w1h-list">
+              {items.map((item) => (
+                <div key={item.name} className="w1h-row">
+                  <dt>{item.name}</dt>
+                  <dd>{item.display}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : (
+            <p className="muted">No data in baseline</p>
+          )}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function flattenProfileFeatures(profile: Record<string, unknown> | undefined | null): ProfileFeature[] {
+  if (!profile || typeof profile !== "object") {
+    return [];
+  }
+  return Object.entries(profile)
+    .map(([name, value]) => ({ name, display: displayFeatureValue(value) }))
+    .filter((feature) => feature.display !== "");
+}
+
+function displayFeatureValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => item !== null && item !== undefined && item !== "")
+      .map((item) => String(item))
+      .join(", ");
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (Array.isArray(record.common_values) && record.common_values.length > 0) {
+      return (record.common_values as unknown[]).map((item) => String(item)).join(", ");
+    }
+    if (typeof record.mean_value === "number") {
+      const parts = [`avg ${roundNumber(record.mean_value)}`];
+      if (typeof record.p95_value === "number") {
+        parts.push(`p95 ${roundNumber(record.p95_value)}`);
+      }
+      return parts.join(", ");
+    }
+    const entries = Object.entries(record).filter(([, item]) => item !== null && item !== undefined && item !== "");
+    if (entries.length === 0) {
+      return "";
+    }
+    return entries
+      .map(([entryKey, item]) => `${entryKey}: ${Array.isArray(item) ? item.join("/") : String(item)}`)
+      .join("; ");
+  }
+  return String(value);
+}
+
+function roundNumber(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function AIJudgementPage() {

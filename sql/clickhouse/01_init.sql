@@ -184,7 +184,10 @@ CREATE TABLE IF NOT EXISTS log_ai.ueba_user_daily_features
     profile_metrics String DEFAULT '{}',
     created_at DateTime DEFAULT now()
 )
-ENGINE = MergeTree
+-- ReplacingMergeTree(created_at) so a re-run for the same (tenant, user, date)
+-- collapses to the latest aggregation; the writer also deletes the day before
+-- inserting, making daily-feature rebuilds idempotent.
+ENGINE = ReplacingMergeTree(created_at)
 PARTITION BY toYYYYMM(feature_date)
 ORDER BY (tenant_id, user_id, feature_date);
 

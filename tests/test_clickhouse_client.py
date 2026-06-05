@@ -29,6 +29,7 @@ class FakeClickHouseClient:
         self.responses = responses
         self.queries: list[dict[str, Any]] = []
         self.inserts: list[dict[str, Any]] = []
+        self.commands: list[dict[str, Any]] = []
 
     def query(self, sql: str, parameters: dict[str, Any] | None = None) -> QueryResult:
         self.queries.append({"sql": _compact_sql(sql), "parameters": parameters or {}})
@@ -36,6 +37,9 @@ class FakeClickHouseClient:
 
     def insert(self, table: str, data: list[list[Any]], column_names: list[str]) -> None:
         self.inserts.append({"table": table, "data": data, "column_names": column_names})
+
+    def command(self, sql: str, parameters: dict[str, Any] | None = None) -> None:
+        self.commands.append({"sql": _compact_sql(sql), "parameters": parameters or {}})
 
 
 def test_list_logs_queries_clickhouse_with_filters_and_normalizes_json() -> None:
@@ -440,11 +444,21 @@ def test_list_daily_reports_maps_clickhouse_report_shape_to_api_shape() -> None:
 
 def test_get_stats_overview_queries_log_and_anomaly_counts() -> None:
     now = datetime(2026, 5, 13, 10, 0, tzinfo=timezone.utc)
+    report_day = date(2026, 5, 13)
     fake = FakeClickHouseClient(
         [
             QueryResult(
-                [(100, now, 5, 3, 1)],
-                ["log_count", "latest_log_ingest_time", "anomaly_count", "high_risk_count", "critical_count"],
+                [(100, now, 5, 3, 1, 2, 7, report_day)],
+                [
+                    "log_count",
+                    "latest_log_ingest_time",
+                    "anomaly_count",
+                    "high_risk_count",
+                    "critical_count",
+                    "ai_pending_count",
+                    "baseline_user_count",
+                    "latest_report_date",
+                ],
             )
         ]
     )
@@ -458,9 +472,14 @@ def test_get_stats_overview_queries_log_and_anomaly_counts() -> None:
         "anomaly_count": 5,
         "high_risk_count": 3,
         "critical_count": 1,
+        "ai_pending_count": 2,
+        "baseline_user_count": 7,
+        "latest_report_date": report_day,
     }
     assert "SELECT count() FROM security_logs WHERE tenant_id = {tenant_id:String}" in fake.queries[0]["sql"]
     assert "SELECT count() FROM anomaly_events WHERE tenant_id = {anom_tenant_id:String}" in fake.queries[0]["sql"]
+    assert "ai_status = 'pending'" in fake.queries[0]["sql"]
+    assert "SELECT uniqExact(user_id) FROM ueba_user_baseline WHERE tenant_id = {tenant_id:String}" in fake.queries[0]["sql"]
     assert fake.queries[0]["parameters"] == {
         "tenant_id": "default",
         "anom_tenant_id": "default",
@@ -488,6 +507,46 @@ def test_list_user_risk_stats_excludes_empty_users_and_orders_by_risk() -> None:
     assert "user_id != ''" in fake.queries[0]["sql"]
     assert "ORDER BY high_risk_count DESC, max_risk_score DESC" in fake.queries[0]["sql"]
     assert fake.queries[0]["parameters"] == {"tenant_id": "default", "limit": 10, "offset": 0}
+
+
+def test_aggregate_daily_features_sql_groups_by_user_in_clickhouse() -> None:
+    fake = FakeClickHouseClient(
+        [
+            QueryResult(
+                [("default", "alice", ["service"], 10, 4)],
+                ["tenant_id", "user_id", "account_type_top", "event_count", "login_count"],
+            )
+        ]
+    )
+    storage = ClickHouseStorage(client=fake)
+
+    rows = storage.aggregate_daily_features_sql(metric_date=date(2026, 5, 31))
+
+    assert rows[0]["user_id"] == "alice"
+    sql = fake.queries[0]["sql"]
+    assert "FROM security_logs" in sql
+    assert "GROUP BY tenant_id, user_id" in sql
+    assert "event_date = {metric_date:Date}" in sql
+    assert fake.queries[0]["parameters"]["metric_date"] == date(2026, 5, 31)
+
+
+def test_insert_user_daily_features_is_idempotent_per_day() -> None:
+    fake = FakeClickHouseClient([])
+    storage = ClickHouseStorage(client=fake)
+
+    storage.insert_user_daily_features(
+        [
+            {"feature_date": date(2026, 5, 31), "tenant_id": "default", "user_id": "alice"},
+            {"feature_date": date(2026, 5, 31), "tenant_id": "default", "user_id": "bob"},
+        ]
+    )
+
+    # One DELETE for the (tenant, feature_date) scope, then a single insert.
+    assert len(fake.commands) == 1
+    assert "ALTER TABLE ueba_user_daily_features DELETE" in fake.commands[0]["sql"]
+    assert fake.commands[0]["parameters"] == {"tenant_id": "default", "feature_date": date(2026, 5, 31)}
+    assert fake.inserts[0]["table"] == "ueba_user_daily_features"
+    assert len(fake.inserts[0]["data"]) == 2
 
 
 def _row(columns: tuple[str, ...], **values: Any) -> tuple[Any, ...]:
