@@ -83,3 +83,44 @@ def test_new_ip_then_sensitive_access() -> None:
     assert correlated
     assert correlated[0].attack_type == "account_takeover"
     assert correlated[0].risk_components["event_correlation"] > 0
+
+
+def test_off_hours_login_only_never_reaches_critical() -> None:
+    """【误报控制回归】非工作时间登录但无任何敏感行为时，风险分绝不突破 critical 区间。
+
+    rare_login_hour 的风险组成为：rule_strength:20 + baseline_deviation:5 = 25（low 级别）。
+    即便将来附加了 time baseline 偏离（medium severity → +15 baseline_deviation），
+    总分上限也仅为 ~35，严禁进入 critical（≥ 90）甚至 high（≥ 70）区间。
+    """
+    # 选择工作时间之外的小时（凌晨 2 点，settings.work_hour_start 默认 9）
+    off_hour_time = datetime(2026, 4, 1, 2, 0, 0)
+    log = build_log(
+        1,
+        action="login",
+        result="success",
+        src_ip="1.1.1.1",
+        resource="/home",
+        user_id="ordinary.user",
+        event_time=off_hour_time,
+        ingest_time=off_hour_time,
+    )
+    alerts = detect_batch([log])
+
+    # 应触发非工作时间登录规则
+    off_hour_alerts = [a for a in alerts if "rare_login_hour" in a.reason_codes]
+    assert off_hour_alerts, "应至少产出一条 rare_login_hour 异常事件"
+
+    for alert in off_hour_alerts:
+        # 仅有 rare_login_hour，不得混入敏感操作相关 reason_code
+        assert "sensitive_resource_access" not in alert.reason_codes
+        assert "new_source_then_sensitive_access" not in alert.reason_codes
+
+        # 风险分严禁突破 critical（≥ 90）
+        assert alert.risk_score < 90, (
+            f"非工作时间单纯登录不应达到 critical，实际得分 {alert.risk_score}"
+        )
+        # 同时也不应达到 high（≥ 70）——单独 rare_login_hour 不足以触发高风险
+        assert alert.risk_score < 70, (
+            f"非工作时间单纯登录不应达到 high，实际得分 {alert.risk_score}"
+        )
+        assert alert.risk_level != "critical"
