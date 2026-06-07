@@ -72,20 +72,29 @@ class FakeStorage:
         source_key: str | None = None,
         limit: int = 10000,
     ) -> list[dict[str, Any]]:
-        key = (tenant_id, user_id or "", source_type or "", source_key or "")
-        if key not in self.seen_sources:
-            return []
-        return [
-            {
-                "tenant_id": tenant_id,
-                "user_id": user_id,
-                "source_type": source_type,
-                "source_key": source_key,
+        # 支持两种调用模式：
+        # 1. 精确四元组查询（_merge_existing_seen_source 传入完整 key）
+        # 2. 批量过滤查询（load_user_context 只传 tenant/user/source_type，无 source_key）
+        results = []
+        for t, u, st, sk in self.seen_sources:
+            if tenant_id and t != tenant_id:
+                continue
+            if user_id and u != (user_id or ""):
+                continue
+            if source_type and st != source_type:
+                continue
+            if source_key and sk != source_key:
+                continue
+            results.append({
+                "tenant_id": t,
+                "user_id": u,
+                "source_type": st,
+                "source_key": sk,
                 "first_seen_time": BASE_TIME - timedelta(days=1),
                 "last_seen_time": BASE_TIME - timedelta(days=1),
                 "seen_count": 3,
-            }
-        ][:limit]
+            })
+        return results[:limit]
 
     def upsert_user_seen_sources(self, sources: list[dict[str, Any]]) -> None:
         self.upserted_sources.extend(sources)
@@ -262,6 +271,8 @@ def test_worker_attaches_baseline_deviations_to_rule_anomaly() -> None:
             ("default", "alice"): {
                 "tenant_id": "default",
                 "user_id": "alice",
+                "baseline_confidence": 0.8,
+                "sample_days": 30,
                 "location_profile": {"common_ips": ["10.0.0.7"]},
                 "time_profile": {"active_hours": ["09:00-18:00"]},
                 "access_profile": {"common_resources": ["/home"]},
@@ -284,10 +295,14 @@ def test_worker_attaches_baseline_deviations_to_rule_anomaly() -> None:
     assert anomaly.baseline_deviations == [
         {
             "feature": "resource",
+            "profile_group": "access",
             "expected": ["/home"],
             "actual": "/api/admin/export",
+            "deviation_type": "sensitive_resource_access",
             "severity": "high",
-            "reason": "outside_baseline_common_resources",
+            "confidence": 0.8,
+            "evidence_source": "user_baseline",
+            "sample_days": 30,
         }
     ]
     assert anomaly.risk_components["baseline_deviation"] == 25
