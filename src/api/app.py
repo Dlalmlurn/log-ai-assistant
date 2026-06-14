@@ -407,11 +407,21 @@ def analyze_alert(
     try:
         baseline = _fetch_alert_baseline(storage, alert)
         related_logs = _fetch_related_logs(storage, alert)
+        anomaly_event = AnomalyEvent.model_validate(alert)
+        _evidence = anomaly_event.evidence or {}
+        window_stats: dict[str, Any] = _evidence.get("window_stats") or {}
+        if not window_stats and anomaly_event.related_event_ids:
+            try:
+                window_stats = storage.security_log_quality_stats(
+                    anomaly_event.related_event_ids
+                )
+            except Exception:
+                window_stats = {}
         report = analyzer.analyze(
-            event=AnomalyEvent.model_validate(alert),
+            event=anomaly_event,
             baseline=baseline,
             related_logs=related_logs,
-            window_stats={},
+            window_stats=window_stats,
         )
         storage.insert_ai_judgement(report)
         storage.update_anomaly_ai_status(event_id, "analyzed")
