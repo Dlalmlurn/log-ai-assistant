@@ -1101,14 +1101,32 @@ function AlertDetailPanel({
           <section className="detail-section">
             <div className="detail-section-title">
               <h3>Evidence Chain</h3>
-              <span>{detail.evidence_chain.baseline_deviations.length} baseline deviations</span>
+              <span>{detail.anomaly.baseline_deviations.length} baseline deviations</span>
             </div>
             <p className="risk-reason">{detail.evidence_chain.risk_reason || "No risk reason returned."}</p>
-            {detail.evidence_chain.baseline_deviations.length > 0 ? (
+            {detail.anomaly.baseline_deviations.length > 0 ? (
               <ul className="evidence-list">
-                {detail.evidence_chain.baseline_deviations.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
+                {detail.anomaly.baseline_deviations.map((deviation) => {
+                  const feature = String(deviation.feature ?? deviation.name ?? "unknown");
+                  const actual = String(deviation.actual ?? deviation.value ?? "—");
+                  const source = String(deviation.evidence_source ?? "");
+                  const sourceLabel =
+                    source === "user_history"
+                      ? "来自用户历史基线"
+                      : source === "seen_sources"
+                        ? "来自持久化已见来源表"
+                        : source || "未知来源";
+                  const sampleDays = deviation.sample_days != null ? Number(deviation.sample_days) : undefined;
+                  return (
+                    <li key={`${feature}-${actual}`}>
+                      <strong>{feature}</strong>: {actual}
+                      <span className="evidence-meta">
+                        <span className="evidence-source">{sourceLabel}</span>
+                        {sampleDays !== undefined ? <span className="evidence-days">{sampleDays} days</span> : null}
+                      </span>
+                    </li>
+                  );
+                })}
               </ul>
             ) : (
               <p className="muted">No baseline deviations returned.</p>
@@ -1217,6 +1235,8 @@ function UserProfilesPage() {
               <span>{profile.sample_days} days</span>
               <span>{profile.sample_count} samples</span>
               <span>{profile.fallback_level ?? "none"}</span>
+              <span>模型 {profile.model_version}</span>
+              <span>训练窗口 {profile.trained_from} ~ {profile.trained_to}</span>
             </div>
             <FiveW1HSections profile={profile} />
             <details className="profile-raw">
@@ -1268,8 +1288,31 @@ function FiveW1HSections({ profile }: { profile: UserBaseline }) {
   );
   const whatFromAccess = access.filter((feature) => !howFromAccess.includes(feature));
 
+  const whoItems = flattenProfileFeatures(profile.who_profile);
+  const whoWithMeta: ProfileFeature[] = [
+    { name: "user_id", display: profile.user_id },
+    { name: "user_role", display: String(profile.who_profile?.user_role ?? profile.user_id ?? "unknown") },
+    ...whoItems
+  ];
+
+  const whyItems = flattenProfileFeatures(profile.why_profile);
+  const whyWithMeta: ProfileFeature[] = [
+    { name: "baseline_confidence", display: `${Math.round(profile.baseline_confidence * 100)}%` },
+    { name: "fallback_level", display: profile.fallback_level ?? "none" },
+    ...whyItems
+  ];
+
+  const dimensionEmptyLabels: Record<string, string> = {
+    who: "尚无用户身份与角色数据",
+    when: "尚无活跃时间分布数据",
+    where: "尚无登录源 IP / 地理位置记录",
+    what: "尚无资源访问与行为体量数据",
+    why: "尚无业务上下文数据",
+    how: "尚无接入设备与认证方式数据"
+  };
+
   const dimensions: Array<{ key: string; title: string; subtitle: string; icon: typeof Activity; items: ProfileFeature[] }> = [
-    { key: "who", title: "Who", subtitle: "User, role, department, account type", icon: UserRound, items: flattenProfileFeatures(profile.who_profile) },
+    { key: "who", title: "Who", subtitle: "User, role, department, account type", icon: UserRound, items: whoWithMeta },
     { key: "when", title: "When", subtitle: "Active hours and weekdays", icon: Clock3, items: flattenProfileFeatures(profile.time_profile) },
     { key: "where", title: "Where", subtitle: "Common IPs and locations", icon: RadioTower, items: flattenProfileFeatures(profile.location_profile) },
     {
@@ -1279,7 +1322,7 @@ function FiveW1HSections({ profile }: { profile: UserBaseline }) {
       icon: ListFilter,
       items: [...whatFromAccess, ...flattenProfileFeatures(profile.volume_profile), ...flattenProfileFeatures(profile.result_profile)]
     },
-    { key: "why", title: "Why", subtitle: "Business context and resource purpose", icon: Sparkles, items: flattenProfileFeatures(profile.why_profile) },
+    { key: "why", title: "Why", subtitle: "Business context and resource purpose", icon: Sparkles, items: whyWithMeta },
     { key: "how", title: "How", subtitle: "Device, user-agent and auth method", icon: Server, items: howFromAccess }
   ];
 
@@ -1304,7 +1347,7 @@ function FiveW1HSections({ profile }: { profile: UserBaseline }) {
               ))}
             </dl>
           ) : (
-            <p className="muted">No data in baseline</p>
+            <p className="muted">{dimensionEmptyLabels[key] ?? "暂无数据"}</p>
           )}
         </section>
       ))}
@@ -1412,7 +1455,7 @@ function AIJudgementPage() {
             <p>{item.judgement}</p>
             <div className="tag-list">
               <span>{item.model_name}</span>
-              <span>{item.is_mock ? "is_mock: true" : "is_mock: false"}</span>
+              {item.is_mock && <span className="mock-badge" aria-label="Mock result">⚠ MOCK</span>}
               <span>confidence {item.confidence}</span>
             </div>
             <JsonBlock value={{ key_reasons: item.key_reasons, recommended_actions: item.recommended_actions, feedback_suggestions: item.feedback_suggestions }} />
