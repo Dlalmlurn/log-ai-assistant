@@ -27,23 +27,33 @@ import {
 import {
   analyzeAlert,
   ApiRequestError,
+  createBaselineOverride,
   createDailyReport,
   createFeedback,
   fetchAIReports,
   fetchAlertDetail,
   fetchAlerts,
   fetchBaselines,
+  fetchBaselineOverrides,
   fetchDailyReports,
+  fetchFeedback,
   fetchHealth,
   fetchLogs,
   fetchStatsOverview,
-  fetchUserRiskStats
+  fetchUserRiskStats,
+  rebuildBaselines,
+  reviewFeedback,
+  revokeBaselineOverride
 } from "./api";
 import type {
+  AIFeedback,
   AIJudgement,
   AnomalyDetailResponse,
   AnomalyEvent,
   AlertsQuery,
+  BaselineMergeMode,
+  BaselineOverride,
+  BaselinePeriodType,
   DailyReport,
   HealthResponse,
   LogsQuery,
@@ -1182,6 +1192,36 @@ function UserProfilesPage() {
     error: null,
     updatedAt: null
   });
+  const [overrides, setOverrides] = useState<LoadState<{ items: BaselineOverride[]; total: number }>>({
+    data: null,
+    loading: true,
+    error: null,
+    updatedAt: null
+  });
+  const [feedback, setFeedback] = useState<LoadState<{ items: AIFeedback[]; total: number }>>({
+    data: null,
+    loading: true,
+    error: null,
+    updatedAt: null
+  });
+  const [action, setAction] = useState<{ loading: boolean; message: string | null; error: string | null }>({
+    loading: false,
+    message: null,
+    error: null
+  });
+  const [overrideDraft, setOverrideDraft] = useState({
+    user_id: "",
+    profile_group: "time" as BaselineOverride["profile_group"],
+    feature_name: "active_hours",
+    period_type: "weekday" as BaselinePeriodType,
+    period_key: "saturday",
+    merge_mode: "append" as BaselineMergeMode,
+    override_value: '{"common_values":["09:00-13:00"]}',
+    reason: "",
+    effective_from: localDateTimeValue(new Date()),
+    effective_to: "",
+    created_by: "analyst"
+  });
 
   const load = useCallback((activeQuery = query, signal?: AbortSignal) => {
     setState((current) => ({ ...current, loading: true, error: null }));
@@ -1195,29 +1235,101 @@ function UserProfilesPage() {
       });
   }, [query]);
 
+  const loadGovernance = useCallback((signal?: AbortSignal) => {
+    setOverrides((current) => ({ ...current, loading: true, error: null }));
+    setFeedback((current) => ({ ...current, loading: true, error: null }));
+    fetchBaselineOverrides({ limit: 100, offset: 0 }, signal)
+      .then((data) => setOverrides({ data, loading: false, error: null, updatedAt: new Date() }))
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setOverrides((current) => ({ ...current, loading: false, error: formatError(error) }));
+      });
+    fetchFeedback({ review_status: "pending", target_component: "baseline", limit: 100, offset: 0 }, signal)
+      .then((data) => setFeedback({ data, loading: false, error: null, updatedAt: new Date() }))
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setFeedback((current) => ({ ...current, loading: false, error: formatError(error) }));
+      });
+  }, []);
+
   useEffect(() => {
     const controller = new AbortController();
     load(query, controller.signal);
+    loadGovernance(controller.signal);
     return () => controller.abort();
-  }, [load, query]);
+  }, [load, loadGovernance, query]);
+
+  const refreshAll = useCallback(() => {
+    load();
+    loadGovernance();
+  }, [load, loadGovernance]);
+
+  const submitOverride = () => {
+    let overrideValue: Record<string, unknown>;
+    try {
+      overrideValue = JSON.parse(overrideDraft.override_value) as Record<string, unknown>;
+    } catch {
+      setAction({ loading: false, message: null, error: "覆盖值必须是合法 JSON 对象。" });
+      return;
+    }
+    setAction({ loading: true, message: null, error: null });
+    createBaselineOverride({
+      tenant_id: "default",
+      user_id: overrideDraft.user_id,
+      profile_group: overrideDraft.profile_group,
+      feature_name: overrideDraft.feature_name,
+      period_type: overrideDraft.period_type,
+      period_key: overrideDraft.period_key,
+      merge_mode: overrideDraft.merge_mode,
+      override_value: overrideValue,
+      reason: overrideDraft.reason,
+      effective_from: new Date(overrideDraft.effective_from).toISOString(),
+      effective_to: overrideDraft.effective_to ? new Date(overrideDraft.effective_to).toISOString() : null,
+      created_by: overrideDraft.created_by
+    })
+      .then((item) => {
+        setAction({ loading: false, message: `已创建覆盖项 ${item.override_id}，版本 ${item.model_version}。`, error: null });
+        setOverrideDraft((current) => ({ ...current, reason: "" }));
+        refreshAll();
+      })
+      .catch((error: unknown) => setAction({ loading: false, message: null, error: formatError(error) }));
+  };
+
+  const rebuild = () => {
+    setAction({ loading: true, message: null, error: null });
+    rebuildBaselines()
+      .then((result) => {
+        setAction({ loading: false, message: `周期基线重建完成，共生成 ${result.rebuilt_count} 组画像。`, error: null });
+        refreshAll();
+      })
+      .catch((error: unknown) => setAction({ loading: false, message: null, error: formatError(error) }));
+  };
 
   return (
     <section className="page">
       <PageHeader
         kicker="行为基线"
         title="用户画像"
-        description="展示来自 ClickHouse 用户基线 API 的行为基线画像。"
+        description="管理周期行为画像、有效覆盖项与待审核的 baseline 反馈。"
         action={
-          <button className="icon-button primary" type="button" onClick={() => load()} disabled={state.loading}>
-            <RefreshCcw aria-hidden="true" className={state.loading ? "spin" : ""} />
-            刷新
-          </button>
+          <div className="header-actions">
+            <button className="icon-button" type="button" onClick={rebuild} disabled={action.loading}>
+              <Database aria-hidden="true" />
+              重建周期基线
+            </button>
+            <button className="icon-button primary" type="button" onClick={refreshAll} disabled={state.loading}>
+              <RefreshCcw aria-hidden="true" className={state.loading ? "spin" : ""} />
+              刷新
+            </button>
+          </div>
         }
       />
       {state.error ? <ErrorBanner message={state.error} /> : null}
+      {action.error ? <ErrorBanner message={action.error} /> : null}
+      {action.message ? <div className="success-banner">{action.message}</div> : null}
       <div className="profile-grid">
         {state.data?.items.map((profile) => (
-          <article className="profile-card" key={`${profile.tenant_id}:${profile.user_id}:${profile.baseline_date}`}>
+          <article className="profile-card" key={`${profile.tenant_id}:${profile.user_id}:${profile.period_type}:${profile.period_key}`}>
             <div className="profile-card-head">
               <div>
                 <span className="eyebrow">{profile.tenant_id}</span>
@@ -1229,9 +1341,11 @@ function UserProfilesPage() {
               <span>{profile.baseline_date}</span>
               <span>{profile.sample_days} 天</span>
               <span>{profile.sample_count} 个样本</span>
+              <span>{profile.period_type}:{profile.period_key}</span>
               <span>{formatFallbackLevel(profile.fallback_level)}</span>
               <span>模型 {profile.model_version}</span>
               <span>训练窗口 {profile.trained_from} ~ {profile.trained_to}</span>
+              <span>覆盖项 {profile.selected_baseline?.override_ids?.length ?? 0} 个</span>
             </div>
             <FiveW1HSections profile={profile} />
             <details className="profile-raw">
@@ -1257,7 +1371,163 @@ function UserProfilesPage() {
         onPrevious={() => setQuery((current) => ({ ...current, offset: Math.max(0, current.offset - current.limit) }))}
         onNext={() => setQuery((current) => ({ ...current, offset: current.offset + current.limit }))}
       />
+
+      <section className="governance-section">
+        <div className="section-heading">
+          <div>
+            <span className="eyebrow">人工追加</span>
+            <h2>Baseline Override</h2>
+          </div>
+          <span>{overrides.data?.total ?? 0} 条审计记录</span>
+        </div>
+        {overrides.error ? <ErrorBanner message={overrides.error} /> : null}
+        <div className="governance-layout">
+          <div className="management-form">
+            <label>用户<input value={overrideDraft.user_id} onChange={(event) => setOverrideDraft((current) => ({ ...current, user_id: event.target.value }))} placeholder="alice" /></label>
+            <label>Profile<select value={overrideDraft.profile_group} onChange={(event) => setOverrideDraft((current) => ({ ...current, profile_group: event.target.value as BaselineOverride["profile_group"] }))}>{["who", "time", "location", "access", "volume", "result", "why"].map((item) => <option key={item}>{item}</option>)}</select></label>
+            <label>Feature<input value={overrideDraft.feature_name} onChange={(event) => setOverrideDraft((current) => ({ ...current, feature_name: event.target.value }))} /></label>
+            <label>周期类型<select value={overrideDraft.period_type} onChange={(event) => setOverrideDraft((current) => ({ ...current, period_type: event.target.value as BaselinePeriodType }))}>{baselinePeriodOptions.map((item) => <option key={item}>{item}</option>)}</select></label>
+            <label>周期值<input value={overrideDraft.period_key} onChange={(event) => setOverrideDraft((current) => ({ ...current, period_key: event.target.value }))} /></label>
+            <label>合并方式<select value={overrideDraft.merge_mode} onChange={(event) => setOverrideDraft((current) => ({ ...current, merge_mode: event.target.value as BaselineMergeMode }))}>{["append", "replace", "adjust"].map((item) => <option key={item}>{item}</option>)}</select></label>
+            <label className="form-span-2">覆盖值 JSON<textarea value={overrideDraft.override_value} onChange={(event) => setOverrideDraft((current) => ({ ...current, override_value: event.target.value }))} rows={3} /></label>
+            <label>生效时间<input type="datetime-local" value={overrideDraft.effective_from} onChange={(event) => setOverrideDraft((current) => ({ ...current, effective_from: event.target.value }))} /></label>
+            <label>失效时间<input type="datetime-local" value={overrideDraft.effective_to} onChange={(event) => setOverrideDraft((current) => ({ ...current, effective_to: event.target.value }))} /></label>
+            <label>操作者<input value={overrideDraft.created_by} onChange={(event) => setOverrideDraft((current) => ({ ...current, created_by: event.target.value }))} /></label>
+            <label className="form-span-2">原因<textarea value={overrideDraft.reason} onChange={(event) => setOverrideDraft((current) => ({ ...current, reason: event.target.value }))} rows={2} /></label>
+            <button className="icon-button primary form-submit" type="button" disabled={action.loading || !overrideDraft.user_id || !overrideDraft.reason} onClick={submitOverride}>
+              <CheckCircle2 aria-hidden="true" />
+              创建 active override
+            </button>
+          </div>
+          <div className="override-list">
+            {overrides.data?.items.map((item) => (
+              <article className="override-card" key={item.override_id}>
+                <div className="profile-card-head">
+                  <div><span className="eyebrow">{item.source_type}</span><h3>{item.user_id || "全局"} · {item.profile_group}.{item.feature_name}</h3></div>
+                  <StatusPill ok={item.status === "active"} label={item.status} />
+                </div>
+                <p>{item.reason}</p>
+                <div className="profile-meta"><span>{item.period_type}:{item.period_key}</span><span>{item.merge_mode}</span><span>{formatDateTime(item.effective_from)}</span><span>{item.model_version}</span></div>
+                <JsonBlock value={item.override_value} />
+                {item.status === "active" ? (
+                  <button className="icon-button danger" type="button" onClick={() => {
+                    const reason = window.prompt("请输入撤销原因");
+                    if (!reason) return;
+                    revokeBaselineOverride(item.override_id, { revoked_by: "analyst", reason })
+                      .then(() => refreshAll())
+                      .catch((error: unknown) => setAction({ loading: false, message: null, error: formatError(error) }));
+                  }}>
+                    <XCircle aria-hidden="true" />
+                    撤销
+                  </button>
+                ) : null}
+              </article>
+            ))}
+            {!overrides.loading && overrides.data?.items.length === 0 ? <EmptyState title="暂无覆盖项" detail="人工追加或审核通过后会在这里形成独立审计记录。" /> : null}
+          </div>
+        </div>
+      </section>
+
+      <section className="governance-section">
+        <div className="section-heading">
+          <div><span className="eyebrow">反馈治理</span><h2>待审核 Baseline 反馈</h2></div>
+          <span>{feedback.data?.total ?? 0} 条待处理</span>
+        </div>
+        {feedback.error ? <ErrorBanner message={feedback.error} /> : null}
+        <div className="compact-list">
+          {feedback.data?.items.map((item) => <FeedbackReviewCard key={item.feedback_id} feedback={item} onReviewed={refreshAll} onError={(error) => setAction({ loading: false, message: null, error })} />)}
+          {!feedback.loading && feedback.data?.items.length === 0 ? <EmptyState title="暂无待审核反馈" detail="AI baseline 建议会先进入 pending，审核后才可能生成 override。" /> : null}
+        </div>
+      </section>
     </section>
+  );
+}
+
+const baselinePeriodOptions: BaselinePeriodType[] = [
+  "global",
+  "rolling",
+  "weekday",
+  "calendar_month",
+  "month_phase",
+  "weekday_month_phase"
+];
+
+function FeedbackReviewCard({
+  feedback,
+  onReviewed,
+  onError
+}: {
+  feedback: AIFeedback;
+  onReviewed: () => void;
+  onError: (message: string) => void;
+}) {
+  const [loading, setLoading] = useState(false);
+  const [draft, setDraft] = useState({
+    review_reason: "",
+    profile_group: "access" as BaselineOverride["profile_group"],
+    feature_name: "common_resources",
+    period_type: "global" as BaselinePeriodType,
+    period_key: "all",
+    merge_mode: "append" as BaselineMergeMode,
+    override_value: '{"common_values":[]}',
+    effective_from: localDateTimeValue(new Date()),
+    effective_to: ""
+  });
+
+  const submit = (decision: "accepted" | "rejected") => {
+    let overrideValue: Record<string, unknown> = {};
+    if (decision === "accepted") {
+      try {
+        overrideValue = JSON.parse(draft.override_value) as Record<string, unknown>;
+      } catch {
+        onError("反馈覆盖值必须是合法 JSON 对象。");
+        return;
+      }
+    }
+    setLoading(true);
+    reviewFeedback(feedback.feedback_id, {
+      decision,
+      reviewed_by: "analyst",
+      review_reason: draft.review_reason,
+      override: decision === "accepted" ? {
+        profile_group: draft.profile_group,
+        feature_name: draft.feature_name,
+        period_type: draft.period_type,
+        period_key: draft.period_key,
+        merge_mode: draft.merge_mode,
+        override_value: overrideValue,
+        effective_from: new Date(draft.effective_from).toISOString(),
+        effective_to: draft.effective_to ? new Date(draft.effective_to).toISOString() : null
+      } : undefined
+    })
+      .then(onReviewed)
+      .catch((error: unknown) => onError(formatError(error)))
+      .finally(() => setLoading(false));
+  };
+
+  return (
+    <article className="judgement-card feedback-review-card">
+      <div className="profile-card-head">
+        <div><span className="eyebrow">{feedback.feedback_id}</span><h3>{feedback.user_id || "未绑定用户"}</h3></div>
+        <StatusPill ok={false} label={feedback.review_status} />
+      </div>
+      <p>{feedback.suggestion}</p>
+      <div className="management-form compact-form">
+        <label>Profile<select value={draft.profile_group} onChange={(event) => setDraft((current) => ({ ...current, profile_group: event.target.value as BaselineOverride["profile_group"] }))}>{["who", "time", "location", "access", "volume", "result", "why"].map((item) => <option key={item}>{item}</option>)}</select></label>
+        <label>Feature<input value={draft.feature_name} onChange={(event) => setDraft((current) => ({ ...current, feature_name: event.target.value }))} /></label>
+        <label>周期类型<select value={draft.period_type} onChange={(event) => setDraft((current) => ({ ...current, period_type: event.target.value as BaselinePeriodType }))}>{baselinePeriodOptions.map((item) => <option key={item}>{item}</option>)}</select></label>
+        <label>周期值<input value={draft.period_key} onChange={(event) => setDraft((current) => ({ ...current, period_key: event.target.value }))} /></label>
+        <label>合并方式<select value={draft.merge_mode} onChange={(event) => setDraft((current) => ({ ...current, merge_mode: event.target.value as BaselineMergeMode }))}>{["append", "replace", "adjust"].map((item) => <option key={item}>{item}</option>)}</select></label>
+        <label className="form-span-2">覆盖值 JSON<textarea rows={2} value={draft.override_value} onChange={(event) => setDraft((current) => ({ ...current, override_value: event.target.value }))} /></label>
+        <label>生效时间<input type="datetime-local" value={draft.effective_from} onChange={(event) => setDraft((current) => ({ ...current, effective_from: event.target.value }))} /></label>
+        <label>失效时间<input type="datetime-local" value={draft.effective_to} onChange={(event) => setDraft((current) => ({ ...current, effective_to: event.target.value }))} /></label>
+        <label className="form-span-2">审核原因<textarea rows={2} value={draft.review_reason} onChange={(event) => setDraft((current) => ({ ...current, review_reason: event.target.value }))} /></label>
+      </div>
+      <div className="review-actions">
+        <button className="icon-button primary" type="button" disabled={loading || !draft.review_reason} onClick={() => submit("accepted")}><CheckCircle2 aria-hidden="true" />接受并追加</button>
+        <button className="icon-button danger" type="button" disabled={loading || !draft.review_reason} onClick={() => submit("rejected")}><XCircle aria-hidden="true" />拒绝</button>
+      </div>
+    </article>
   );
 }
 
@@ -1745,6 +2015,11 @@ function formatDateTime(value?: string | null): string {
 
 function formatNumber(value?: number | null): string {
   return typeof value === "number" ? value.toLocaleString() : "0";
+}
+
+function localDateTimeValue(value: Date): string {
+  const offset = value.getTimezoneOffset() * 60_000;
+  return new Date(value.getTime() - offset).toISOString().slice(0, 16);
 }
 
 function todayInShanghai(): string {

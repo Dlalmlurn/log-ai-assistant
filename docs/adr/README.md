@@ -33,6 +33,7 @@ ADR 不是普通备忘录，也不是任务清单。它记录的是会长期影�
 | `ADR-007-unified-anomaly-event.md` | 统一异常事件对象和风险等级枚举。 |
 | `ADR-008-generated-priors-are-not-baselines.md` | 生成器画像不等于系统行为 baseline。 |
 | `ADR-009-docker-compose-runtime-environment.md` | Docker Compose 作为正式运行环境基准。 |
+| `ADR-010-periodic-baselines-and-reviewed-overrides.md` | 周期 baseline 与审核后生效的覆盖层。 |
 
 ## 追加规则
 

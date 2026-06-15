@@ -50,9 +50,13 @@
 | GET | `/api/v1/baselines/users` | REQ-003, REQ-006 | 查询用户 baseline 列表。 |
 | GET | `/api/v1/baselines/users/{user_id}` | REQ-003, REQ-006 | 查询单个用户画像。 |
 | POST | `/api/v1/baselines/rebuild` | REQ-003 | 触发 baseline 重建任务。 |
+| GET | `/api/v1/baselines/overrides` | REQ-003, REQ-006 | 查询 baseline 覆盖项。 |
+| POST | `/api/v1/baselines/overrides` | REQ-003 | 手动创建 baseline 覆盖项。 |
+| POST | `/api/v1/baselines/overrides/{override_id}/revoke` | REQ-003 | 撤销已生效的覆盖项。 |
 | POST | `/api/v1/ai/judge/{event_id}` | REQ-004 | 对异常事件执行 AI 研判。 |
 | GET | `/api/v1/ai/judgements` | REQ-004, REQ-006 | 查询 AI 研判结果。 |
 | POST | `/api/v1/feedback` | REQ-004 | 写入 AI 或人工反馈。 |
+| POST | `/api/v1/feedback/{feedback_id}/review` | REQ-003, REQ-004 | 接受或拒绝反馈；接受 baseline 建议时生成 override。 |
 | GET | `/api/v1/reports/daily` | REQ-005, REQ-006 | 查询每日安全态势简报。 |
 | POST | `/api/v1/reports/daily` | REQ-005 | 生成指定日期日报。 |
 | GET | `/api/v1/stats/overview` | REQ-006 | 查询工作台概览。 |
@@ -181,8 +185,16 @@
 {
   "user_id": "alice",
   "baseline_date": "2026-05-19",
-  "model_version": "baseline-v1",
+  "model_version": "baseline-v2-weekday",
+  "period_type": "weekday",
+  "period_key": "monday",
   "sample_days": 30,
+  "selected_baseline": {
+    "period_type": "weekday_month_phase",
+    "period_key": "monday:month_end",
+    "fallback_level": "none",
+    "override_ids": ["override-001"]
+  },
   "who": {},
   "when": {},
   "where": {},
@@ -191,6 +203,64 @@
   "how": {}
 }
 ```
+
+### `POST /api/v1/baselines/overrides`
+
+用于授权分析人员手动追加 baseline 策略。人工创建不改写历史统计行。
+
+请求：
+
+```json
+{
+  "tenant_id": "default",
+  "user_id": "alice",
+  "profile_group": "time",
+  "feature_name": "active_hours",
+  "period_type": "weekday",
+  "period_key": "saturday",
+  "merge_mode": "append",
+  "override_value": {
+    "common_values": ["09:00-13:00"]
+  },
+  "reason": "已确认的周六值班安排",
+  "effective_from": "2026-06-20T00:00:00Z",
+  "effective_to": "2026-08-31T23:59:59Z"
+}
+```
+
+响应必须包含 `override_id`、`status`、`created_by` 和新的 `model_version`。
+
+### `POST /api/v1/feedback/{feedback_id}/review`
+
+请求：
+
+```json
+{
+  "decision": "accepted",
+  "review_reason": "确认属于月末固定财务导出行为",
+  "override": {
+    "profile_group": "access",
+    "feature_name": "common_resources",
+    "period_type": "month_phase",
+    "period_key": "month_end",
+    "merge_mode": "append",
+    "override_value": {
+      "common_values": ["/api/reports/export"]
+    },
+    "effective_from": "2026-06-15T00:00:00Z",
+    "effective_to": null
+  }
+}
+```
+
+接受面向 baseline 的反馈时，后端必须在同一业务操作中：
+
+1. 将反馈更新为 `accepted`。
+2. 创建 `ueba_baseline_overrides` 记录。
+3. 生成新的 `model_version`。
+4. 返回 `applied_override_id` 和 `applied_version`。
+
+拒绝反馈时不得产生 override。
 
 ## AI 研判
 
@@ -238,7 +308,7 @@
 | --- | --- |
 | 实时日志 | `GET /api/v1/logs` |
 | 异常事件 | `GET /api/v1/anomalies`, `GET /api/v1/anomalies/{event_id}` |
-| 用户画像 | `GET /api/v1/baselines/users`, `GET /api/v1/baselines/users/{user_id}` |
+| 用户画像 | `GET /api/v1/baselines/users`, `GET /api/v1/baselines/users/{user_id}`, baseline override 接口 |
 | AI 研判 | `GET /api/v1/ai/judgements`, `POST /api/v1/ai/judge/{event_id}` |
 | 安全态势简报 | `GET /api/v1/reports/daily`, `POST /api/v1/reports/daily` |
 | 系统状态 | `GET /api/v1/health` |

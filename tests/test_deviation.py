@@ -309,6 +309,33 @@ def test_baseline_deviation_to_dict_has_all_9_fields() -> None:
     assert set(d.keys()) == expected_keys
 
 
+def test_baseline_deviation_includes_effective_baseline_audit_metadata() -> None:
+    baseline = {
+        **_HIGH_CONFIDENCE_BASELINE,
+        "period_type": "weekday",
+        "period_key": "monday",
+        "model_version": "baseline-effective-1",
+        "selected_baseline": {
+            "period_type": "weekday",
+            "period_key": "monday",
+            "fallback_level": "none",
+            "override_ids": ["override-1"],
+            "model_version": "baseline-effective-1",
+        },
+    }
+    result = evaluate_deviations(
+        _make_log(src_ip="9.9.9.9"),
+        _make_context(baseline=baseline),
+    )
+
+    payload = result[0].to_dict()
+    assert payload["period_type"] == "weekday"
+    assert payload["period_key"] == "monday"
+    assert payload["model_version"] == "baseline-effective-1"
+    assert payload["override_ids"] == ["override-1"]
+    assert payload["fallback_level"] == "none"
+
+
 # ============================================================================
 # 低置信度动态降级（核心误报控制逻辑）
 # ============================================================================

@@ -8,6 +8,8 @@ AI 只对高可疑异常事件的结构化证据包进行研判，并将输出�
 
 AI 不直接分析全量日志，也不直接修改生产规则。
 
+AI 建议经人工接受后生成 baseline override 的方式由 `ADR-010-periodic-baselines-and-reviewed-overrides.md` 补充。
+
 ## Context
 
 全量日志输入大模型成本高，也难以保证可复现和可解释。安全分析需要先通过规则、baseline 和评分筛选高可疑事件，再让 AI 解释。

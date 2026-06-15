@@ -5,10 +5,14 @@ import type {
   AnomalyEvent,
   AlertsQuery,
   ApiError,
+  BaselineOverride,
+  BaselineOverrideCreateRequest,
   BaselineRebuildResponse,
   DailyReport,
   DailyReportCreateQuery,
   FeedbackCreateRequest,
+  FeedbackReviewRequest,
+  FeedbackReviewResponse,
   HealthResponse,
   ListResponse,
   LogsQuery,
@@ -80,6 +84,38 @@ export async function rebuildBaselines(signal?: AbortSignal): Promise<BaselineRe
   });
 }
 
+export async function fetchBaselineOverrides(
+  query: PaginationQuery & Partial<{ tenant_id: string; user_id: string; status: string; source_type: string }>,
+  signal?: AbortSignal
+): Promise<ListResponse<BaselineOverride>> {
+  return apiFetch<ListResponse<BaselineOverride>>(withQuery("/api/v1/baselines/overrides", query), { signal });
+}
+
+export async function createBaselineOverride(
+  request: BaselineOverrideCreateRequest,
+  signal?: AbortSignal
+): Promise<BaselineOverride> {
+  return apiFetch<BaselineOverride>("/api/v1/baselines/overrides", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    signal
+  });
+}
+
+export async function revokeBaselineOverride(
+  overrideId: string,
+  request: { revoked_by?: string; reason: string },
+  signal?: AbortSignal
+): Promise<BaselineOverride> {
+  return apiFetch<BaselineOverride>(`/api/v1/baselines/overrides/${encodeURIComponent(overrideId)}/revoke`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    signal
+  });
+}
+
 export async function fetchAIReports(
   query: PaginationQuery,
   signal?: AbortSignal
@@ -106,6 +142,26 @@ export async function createDailyReport(
 
 export async function createFeedback(request: FeedbackCreateRequest, signal?: AbortSignal): Promise<AIFeedback> {
   return apiFetch<AIFeedback>("/api/v1/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    signal
+  });
+}
+
+export async function fetchFeedback(
+  query: PaginationQuery & Partial<{ tenant_id: string; user_id: string; review_status: string; target_component: string }>,
+  signal?: AbortSignal
+): Promise<ListResponse<AIFeedback>> {
+  return apiFetch<ListResponse<AIFeedback>>(withQuery("/api/v1/feedback", query), { signal });
+}
+
+export async function reviewFeedback(
+  feedbackId: string,
+  request: FeedbackReviewRequest,
+  signal?: AbortSignal
+): Promise<FeedbackReviewResponse> {
+  return apiFetch<FeedbackReviewResponse>(`/api/v1/feedback/${encodeURIComponent(feedbackId)}/review`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),

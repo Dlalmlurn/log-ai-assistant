@@ -91,7 +91,9 @@ anomaly_events
   -> AI judgement
   -> ai_judgements
   -> ai_feedback
-  -> rule and baseline tuning candidates
+  -> human review
+  -> rule candidates / baseline overrides
+  -> new rule_version / model_version
 ```
 
 ## 正式路径和辅助工具
@@ -140,7 +142,8 @@ Elasticsearch 不进入运行时依赖。
 历史建模负责：
 
 - 生成日级用户特征。
-- 更新用户 baseline。
+- 更新全局、滚动、星期和月度周期 baseline。
+- 解析周期 fallback，并合并有效的 baseline override。
 - 提供常见来源、常见时间、常见行为和样本置信度。
 - 提供新来源、新设备、新地点判断所需的持久化依据。
 
@@ -162,6 +165,7 @@ AI 负责：
 - 前端不感知底层数据库类型。
 - API 不绑定 ClickHouse 表名作为外部契约。
 - baseline 必须来自历史数据统计，而不是硬编码结论。
+- 人工和 AI 调整必须进入可审计的 override 层，不得覆盖历史统计 baseline。
 - 生成器画像不能直接作为用户 baseline。
 - 新来源判断不能只依赖进程内存。
 - 风险评分必须可解释。

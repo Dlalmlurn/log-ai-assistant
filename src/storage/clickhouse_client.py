@@ -6,7 +6,15 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from src.config import settings
-from src.schemas import AIFeedback, AIJudgement, AnomalyEvent, DailyReport, DataQualityMetric, UserBaseline
+from src.schemas import (
+    AIFeedback,
+    AIJudgement,
+    AnomalyEvent,
+    BaselineOverride,
+    DailyReport,
+    DataQualityMetric,
+    UserBaseline,
+)
 
 
 LOG_COLUMNS: tuple[str, ...] = (
@@ -93,6 +101,8 @@ BASELINE_COLUMNS: tuple[str, ...] = (
     "baseline_date",
     "tenant_id",
     "user_id",
+    "period_type",
+    "period_key",
     "profile_group",
     "feature_name",
     "mean_value",
@@ -110,6 +120,30 @@ BASELINE_COLUMNS: tuple[str, ...] = (
     "fallback_level",
     "model_version",
     "created_at",
+)
+
+BASELINE_OVERRIDE_COLUMNS: tuple[str, ...] = (
+    "override_id",
+    "tenant_id",
+    "user_id",
+    "profile_group",
+    "feature_name",
+    "period_type",
+    "period_key",
+    "merge_mode",
+    "override_value",
+    "source_type",
+    "source_feedback_id",
+    "reason",
+    "status",
+    "effective_from",
+    "effective_to",
+    "created_by",
+    "reviewed_by",
+    "reviewed_at",
+    "model_version",
+    "created_at",
+    "updated_at",
 )
 
 DAILY_REPORT_COLUMNS: tuple[str, ...] = (
@@ -157,6 +191,11 @@ AI_FEEDBACK_COLUMNS: tuple[str, ...] = (
     "target_component",
     "confidence",
     "review_status",
+    "reviewed_by",
+    "reviewed_at",
+    "review_reason",
+    "applied_override_id",
+    "applied_version",
     "created_at",
 )
 
@@ -224,6 +263,7 @@ SEEN_SOURCES_COLUMNS: tuple[str, ...] = (
 
 DAILY_FEATURES_JSON_FIELDS: set[str] = {"profile_metrics", "common_src_ips", "common_ip_prefixes", "common_hosts", "common_actions"}
 AI_JUDGEMENT_JSON_FIELDS = {"feedback_suggestions", "raw_response"}
+BASELINE_OVERRIDE_JSON_FIELDS = {"override_value"}
 DAILY_REPORT_JSON_FIELDS = set()
 
 ALLOWED_AGGREGATE_GROUPS = {
@@ -593,12 +633,14 @@ class ClickHouseStorage:
         )
         where_sql = _where(filters)
         parameters |= _pagination_parameters(limit=limit, offset=offset)
-        # Pick the latest baseline per (tenant_id, user_id); each user has one active baseline.
+        # Pick every period from the latest rebuild for the paginated users, then
+        # resolve one period per user for the requested date.
         rows = self._select_dicts(
             f"""
             WITH baseline_keys AS (
                 SELECT DISTINCT b.tenant_id, b.user_id, b.baseline_date,
-                       b.model_version, b.trained_from, b.trained_to
+                       b.period_type, b.period_key, b.model_version,
+                       b.trained_from, b.trained_to
                 FROM ueba_user_baseline AS b
                 INNER JOIN (
                     SELECT tenant_id, user_id, max(baseline_date) AS baseline_date
@@ -615,8 +657,12 @@ class ClickHouseStorage:
             SELECT {_columns_sql(BASELINE_COLUMNS, "b")}
             FROM ueba_user_baseline AS b
             INNER JOIN baseline_keys AS k
-                USING (tenant_id, user_id, baseline_date, model_version, trained_from, trained_to)
-            ORDER BY b.user_id ASC, b.profile_group ASC, b.feature_name ASC
+                USING (
+                    tenant_id, user_id, baseline_date, period_type, period_key,
+                    model_version, trained_from, trained_to
+                )
+            ORDER BY b.user_id ASC, b.period_type ASC, b.period_key ASC,
+                     b.profile_group ASC, b.feature_name ASC
             """,
             parameters,
         )
@@ -629,7 +675,8 @@ class ClickHouseStorage:
             parameters,
             default=0,
         )
-        return _baseline_rows_to_profiles(rows), int(total or 0)
+        profiles = _baseline_rows_to_profiles(rows)
+        return _select_user_periods(profiles, event_time=baseline_date), int(total or 0)
 
     def get_user_baseline(
         self,
@@ -638,14 +685,137 @@ class ClickHouseStorage:
         tenant_id: str | None = None,
         baseline_date: date | None = None,
     ) -> dict[str, Any] | None:
-        items, _total = self.list_user_baselines(
+        filters, parameters = _build_baseline_filters(
             tenant_id=tenant_id,
             user_id=user_id,
-            baseline_date=baseline_date,
-            limit=1,
+            baseline_date=None,
+        )
+        rows = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(BASELINE_COLUMNS)}
+            FROM ueba_user_baseline
+            {_where(filters)}
+              AND baseline_date = (
+                  SELECT max(baseline_date)
+                  FROM ueba_user_baseline
+                  {_where(filters)}
+              )
+            ORDER BY period_type ASC, period_key ASC, profile_group ASC, feature_name ASC
+            """,
+            parameters,
+        )
+        profiles = _baseline_rows_to_profiles(rows)
+        if not profiles:
+            return None
+        overrides, _total = self.list_baseline_overrides(
+            tenant_id=tenant_id,
+            status="active",
+            limit=1000,
             offset=0,
         )
-        return items[0] if items else None
+        overrides = [
+            item
+            for item in overrides
+            if str(item.get("user_id") or "") in {"", user_id}
+        ]
+        from src.ueba.effective import resolve_effective_baseline
+
+        return resolve_effective_baseline(
+            profiles,
+            overrides,
+            event_time=baseline_date,
+        )
+
+    def list_baseline_overrides(
+        self,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        status: str | None = None,
+        source_type: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        filters, parameters = _build_filters(
+            equals={
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "status": status,
+                "source_type": source_type,
+            }
+        )
+        where_sql = _where(filters)
+        parameters |= _pagination_parameters(limit=limit, offset=offset)
+        rows = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(BASELINE_OVERRIDE_COLUMNS)}
+            FROM ueba_baseline_overrides FINAL
+            {where_sql}
+            ORDER BY updated_at DESC, override_id ASC
+            LIMIT {{limit:UInt64}} OFFSET {{offset:UInt64}}
+            """,
+            parameters,
+        )
+        total = self._select_scalar(
+            f"SELECT count() FROM ueba_baseline_overrides FINAL {where_sql}",
+            parameters,
+            default=0,
+        )
+        return [_normalize_baseline_override_row(row) for row in rows], int(total or 0)
+
+    def get_baseline_override(self, override_id: str) -> dict[str, Any] | None:
+        rows = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(BASELINE_OVERRIDE_COLUMNS)}
+            FROM ueba_baseline_overrides FINAL
+            WHERE override_id = {{override_id:String}}
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            {"override_id": override_id},
+        )
+        return _normalize_baseline_override_row(rows[0]) if rows else None
+
+    def insert_baseline_override(self, override: BaselineOverride | dict[str, Any]) -> None:
+        row = _row_from_payload(
+            _model_payload(override),
+            BASELINE_OVERRIDE_COLUMNS,
+            json_fields=BASELINE_OVERRIDE_JSON_FIELDS,
+            defaults={
+                "tenant_id": "default",
+                "user_id": "",
+                "source_feedback_id": "",
+                "reviewed_by": "",
+            },
+        )
+        self.client.insert(
+            "ueba_baseline_overrides",
+            [row],
+            column_names=list(BASELINE_OVERRIDE_COLUMNS),
+        )
+
+    def update_baseline_override_status(
+        self,
+        override_id: str,
+        *,
+        status: str,
+        reviewed_by: str,
+        reason: str,
+        updated_at: datetime,
+    ) -> dict[str, Any] | None:
+        existing = self.get_baseline_override(override_id)
+        if existing is None:
+            return None
+        updated = {
+            **existing,
+            "status": status,
+            "reviewed_by": reviewed_by,
+            "reviewed_at": updated_at,
+            "reason": f"{existing.get('reason') or ''}\n{reason}".strip(),
+            "updated_at": updated_at,
+        }
+        self.insert_baseline_override(updated)
+        return updated
 
     def insert_ai_judgement(self, judgement: AIJudgement | dict[str, Any]) -> None:
         payload = _model_payload(judgement)
@@ -693,9 +863,100 @@ class ClickHouseStorage:
         row = _row_from_payload(
             payload,
             AI_FEEDBACK_COLUMNS,
-            defaults={"judgement_id": "", "user_id": "", "review_status": "pending"},
+            defaults={
+                "judgement_id": "",
+                "user_id": "",
+                "review_status": "pending",
+                "reviewed_by": "",
+                "review_reason": "",
+                "applied_override_id": "",
+                "applied_version": "",
+            },
         )
         self.client.insert("ai_feedback", [row], column_names=list(AI_FEEDBACK_COLUMNS))
+
+    def list_feedback(
+        self,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        review_status: str | None = None,
+        target_component: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        filters, parameters = _build_filters(
+            equals={
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "review_status": review_status,
+                "target_component": target_component,
+            }
+        )
+        where_sql = _where(filters)
+        parameters |= _pagination_parameters(limit=limit, offset=offset)
+        rows = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(AI_FEEDBACK_COLUMNS)}
+            FROM ai_feedback
+            {where_sql}
+            ORDER BY created_at DESC
+            LIMIT {{limit:UInt64}} OFFSET {{offset:UInt64}}
+            """,
+            parameters,
+        )
+        total = self._select_scalar(
+            f"SELECT count() FROM ai_feedback {where_sql}",
+            parameters,
+            default=0,
+        )
+        return [_normalize_feedback_row(row) for row in rows], int(total or 0)
+
+    def get_feedback(self, feedback_id: str) -> dict[str, Any] | None:
+        rows = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(AI_FEEDBACK_COLUMNS)}
+            FROM ai_feedback
+            WHERE feedback_id = {{feedback_id:String}}
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            {"feedback_id": feedback_id},
+        )
+        return _normalize_feedback_row(rows[0]) if rows else None
+
+    def update_feedback_review(
+        self,
+        feedback_id: str,
+        *,
+        review_status: str,
+        reviewed_by: str,
+        reviewed_at: datetime,
+        review_reason: str,
+        applied_override_id: str = "",
+        applied_version: str = "",
+    ) -> None:
+        self.client.command(
+            """
+            ALTER TABLE ai_feedback UPDATE
+                review_status = {review_status:String},
+                reviewed_by = {reviewed_by:String},
+                reviewed_at = {reviewed_at:Nullable(DateTime)},
+                review_reason = {review_reason:String},
+                applied_override_id = {applied_override_id:String},
+                applied_version = {applied_version:String}
+            WHERE feedback_id = {feedback_id:String}
+            """,
+            parameters={
+                "feedback_id": feedback_id,
+                "review_status": review_status,
+                "reviewed_by": reviewed_by,
+                "reviewed_at": reviewed_at,
+                "review_reason": review_reason,
+                "applied_override_id": applied_override_id,
+                "applied_version": applied_version,
+            },
+        )
 
     def insert_daily_report(self, report: DailyReport | dict[str, Any], *, tenant_id: str = "default") -> None:
         payload = _daily_report_payload(_model_payload(report), tenant_id=tenant_id)
@@ -1240,6 +1501,31 @@ def _normalize_ai_judgement_row(row: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _normalize_feedback_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    for field in ("judgement_id", "user_id", "reviewed_by", "review_reason", "applied_override_id", "applied_version"):
+        if normalized.get(field) == "":
+            normalized[field] = None
+    return normalized
+
+
+def _normalize_baseline_override_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    normalized["override_value"] = _json_loads(normalized.get("override_value"), default={})
+    effective_to = normalized.get("effective_to")
+    now = datetime.now(effective_to.tzinfo) if isinstance(effective_to, datetime) and effective_to.tzinfo else datetime.now()
+    if (
+        normalized.get("status") == "active"
+        and isinstance(effective_to, datetime)
+        and effective_to < now
+    ):
+        normalized["status"] = "expired"
+    for field in ("source_feedback_id", "reviewed_by"):
+        if normalized.get(field) == "":
+            normalized[field] = None
+    return normalized
+
+
 # 把日报组织成适合接口返回的对象
 def _normalize_daily_report_row(row: dict[str, Any]) -> dict[str, Any]:
     report_date = row.get("report_date")
@@ -1270,6 +1556,8 @@ def _baseline_rows_to_profiles(rows: Sequence[dict[str, Any]]) -> list[dict[str,
             row.get("baseline_date"),
             row.get("tenant_id"),
             row.get("user_id"),
+            row.get("period_type") or "global",
+            row.get("period_key") or "all",
             row.get("model_version"),
             row.get("trained_from"),
             row.get("trained_to"),
@@ -1281,6 +1569,8 @@ def _baseline_rows_to_profiles(rows: Sequence[dict[str, Any]]) -> list[dict[str,
                 "baseline_date": row.get("baseline_date"),
                 "tenant_id": row.get("tenant_id"),
                 "user_id": row.get("user_id"),
+                "period_type": row.get("period_type") or "global",
+                "period_key": row.get("period_key") or "all",
                 "model_version": row.get("model_version"),
                 "trained_from": row.get("trained_from"),
                 "trained_to": row.get("trained_to"),
@@ -1295,6 +1585,7 @@ def _baseline_rows_to_profiles(rows: Sequence[dict[str, Any]]) -> list[dict[str,
                 "result_profile": {},
                 "why_profile": {},
                 "fallback_level": row.get("fallback_level", "none"),
+                "selected_baseline": {},
                 "created_at": row.get("created_at"),
             },
         )
@@ -1319,6 +1610,34 @@ def _baseline_rows_to_profiles(rows: Sequence[dict[str, Any]]) -> list[dict[str,
             "value_histogram": _json_loads(row.get("value_histogram"), default={}),
         }
     return list(grouped.values())
+
+
+def _select_user_periods(
+    profiles: Sequence[dict[str, Any]],
+    *,
+    event_time: date | datetime | None,
+) -> list[dict[str, Any]]:
+    from src.ueba.effective import select_periodic_baseline
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for item in profiles:
+        key = (str(item.get("tenant_id") or "default"), str(item.get("user_id") or ""))
+        grouped.setdefault(key, []).append(item)
+
+    selected: list[dict[str, Any]] = []
+    for items in grouped.values():
+        item = select_periodic_baseline(items, event_time=event_time)
+        if item is None:
+            continue
+        item["selected_baseline"] = {
+            "period_type": item.get("period_type", "global"),
+            "period_key": item.get("period_key", "all"),
+            "fallback_level": item.get("fallback_level", "none"),
+            "override_ids": [],
+            "model_version": item.get("model_version", ""),
+        }
+        selected.append(item)
+    return selected
 
 
 def _daily_report_payload(payload: dict[str, Any], *, tenant_id: str) -> dict[str, Any]:
@@ -1365,6 +1684,8 @@ def _baseline_rows_from_payload(payload: dict[str, Any]) -> list[list[Any]]:
         "baseline_date": payload.get("baseline_date"),
         "tenant_id": payload.get("tenant_id") or "default",
         "user_id": payload.get("user_id") or "",
+        "period_type": payload.get("period_type") or "global",
+        "period_key": payload.get("period_key") or "all",
         "sample_days": payload.get("sample_days") or 0,
         "sample_count": payload.get("sample_count") or 0,
         "baseline_confidence": payload.get("baseline_confidence") or 0,

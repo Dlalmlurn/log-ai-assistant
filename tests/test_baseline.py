@@ -1,7 +1,12 @@
 import json
 from datetime import date, datetime, timezone
 
-from src.ueba.baseline import aggregate_daily_features, build_baselines_from_logs
+from src.storage.clickhouse_client import DAILY_FEATURES_COLUMNS
+from src.ueba.baseline import (
+    aggregate_daily_features,
+    build_baselines_from_daily_features,
+    build_baselines_from_logs,
+)
 
 
 def test_build_baseline_stats() -> None:
@@ -105,3 +110,63 @@ def test_aggregate_daily_features_uses_clickhouse_pushdown() -> None:
     metrics = json.loads(row["profile_metrics"])
     assert metrics["night_ratio"] == 0.5
     assert metrics["sensitive_ratio"] == 0.2
+
+
+class FakeDailyFeatureStorage:
+    def __init__(self, records: list[dict[str, object]]) -> None:
+        self.records = records
+
+    def query(self, _sql, _parameters):
+        return [tuple(record.get(column) for column in DAILY_FEATURES_COLUMNS) for record in self.records]
+
+
+def test_daily_feature_builder_emits_periodic_baselines() -> None:
+    records = []
+    for feature_date in (
+        date(2025, 5, 26),
+        date(2025, 6, 2),
+        date(2026, 5, 25),
+        date(2026, 6, 1),
+        date(2026, 6, 8),
+    ):
+        records.append(
+            {
+                "feature_date": feature_date,
+                "tenant_id": "default",
+                "user_id": "alice",
+                "account_type": "employee",
+                "login_count": 10,
+                "failed_login_count": 1,
+                "success_login_count": 9,
+                "distinct_src_ip_count": 1,
+                "distinct_host_count": 1,
+                "distinct_action_count": 2,
+                "first_seen_time": datetime.combine(feature_date, datetime.min.time(), tzinfo=timezone.utc).replace(hour=9),
+                "last_seen_time": datetime.combine(feature_date, datetime.min.time(), tzinfo=timezone.utc).replace(hour=18),
+                "night_event_count": 0,
+                "sensitive_action_count": 1,
+                "download_count": 1,
+                "permission_change_count": 0,
+                "new_source_count": 0,
+                "maintenance_window_hit_count": 0,
+                "common_src_ips": ["10.0.0.7"],
+                "common_ip_prefixes": ["10.0.0"],
+                "common_hosts": ["host-a"],
+                "common_actions": ["login", "download"],
+                "profile_metrics": "{}",
+                "created_at": datetime(2026, 6, 9, tzinfo=timezone.utc),
+            }
+        )
+
+    baselines = build_baselines_from_daily_features(FakeDailyFeatureStorage(records))
+    periods = {(item.period_type, item.period_key) for item in baselines}
+
+    assert ("global", "all") in periods
+    assert ("rolling", "30d") in periods
+    assert ("weekday", "monday") in periods
+    assert ("calendar_month", "5") in periods
+    assert ("calendar_month", "6") in periods
+    assert ("month_phase", "month_start") in periods
+    assert ("weekday_month_phase", "monday:month_start") in periods
+    global_baseline = next(item for item in baselines if item.period_type == "global")
+    assert global_baseline.location_profile["common_ips"]["common_values"] == ["10.0.0.7"]

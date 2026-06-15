@@ -5,11 +5,12 @@ from typing import Any
 
 import pytest
 
-from src.schemas import AIFeedback, AIJudgement, DataQualityMetric
+from src.schemas import AIFeedback, AIJudgement, BaselineOverride, DataQualityMetric
 from src.storage.clickhouse_client import (
     AI_FEEDBACK_COLUMNS,
     AI_JUDGEMENT_COLUMNS,
     BASELINE_COLUMNS,
+    BASELINE_OVERRIDE_COLUMNS,
     DATA_QUALITY_COLUMNS,
     DAILY_REPORT_COLUMNS,
     LOG_COLUMNS,
@@ -301,6 +302,43 @@ def test_ai_judgement_and_feedback_inserts_use_table_columns_and_json_strings() 
     feedback_row = dict(zip(AI_FEEDBACK_COLUMNS, fake.inserts[1]["data"][0]))
     assert feedback_row["judgement_id"] == ""
     assert feedback_row["review_status"] == "pending"
+
+
+def test_baseline_override_insert_serializes_structured_value() -> None:
+    fake = FakeClickHouseClient([])
+    storage = ClickHouseStorage(client=fake)
+    now = datetime(2026, 6, 15, 8, 0, tzinfo=timezone.utc)
+
+    storage.insert_baseline_override(
+        BaselineOverride(
+            override_id="override-1",
+            tenant_id="default",
+            user_id="alice",
+            profile_group="access",
+            feature_name="common_resources",
+            period_type="month_phase",
+            period_key="month_end",
+            merge_mode="append",
+            override_value={"common_values": ["/api/reports/export"]},
+            source_type="ai_feedback",
+            source_feedback_id="fb-1",
+            reason="confirmed month-end export",
+            status="active",
+            effective_from=now,
+            created_by="ai-feedback-review",
+            reviewed_by="reviewer",
+            reviewed_at=now,
+            model_version="baseline-effective-1",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    assert fake.inserts[0]["table"] == "ueba_baseline_overrides"
+    assert fake.inserts[0]["column_names"] == list(BASELINE_OVERRIDE_COLUMNS)
+    row = dict(zip(BASELINE_OVERRIDE_COLUMNS, fake.inserts[0]["data"][0]))
+    assert row["override_value"] == '{"common_values":["/api/reports/export"]}'
+    assert row["source_feedback_id"] == "fb-1"
 
 
 def test_data_quality_metric_insert_uses_table_columns() -> None:

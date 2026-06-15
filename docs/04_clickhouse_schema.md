@@ -11,6 +11,8 @@ ClickHouse 用于承载结构化日志、用户特征、baseline、异常事件�
 - 日志表以时间和租户作为主要管理维度。
 - 用户行为分析优先保证按用户、日期、行为、来源聚合的效率。
 - 表结构要支持 T+1 baseline 和历史窗口统计。
+- baseline 表结构要支持星期、月份、月内阶段和滚动窗口等周期范围。
+- 人工和 AI 调整进入独立 override 表，不覆盖历史统计 baseline。
 - 新来源判断需要持久化历史依据。
 - 压缩效果以实测数据为准，不在设计中承诺固定压缩比。
 - 数据契约中标为可选的字段，落库时必须使用稳定默认值或 `Nullable` 类型，避免字段语义和表结构冲突。
@@ -155,6 +157,8 @@ CREATE TABLE ueba_user_baseline
     tenant_id LowCardinality(String),
     user_id String,
 
+    period_type LowCardinality(String),
+    period_key String,
     profile_group LowCardinality(String),
     feature_name LowCardinality(String),
 
@@ -178,7 +182,7 @@ CREATE TABLE ueba_user_baseline
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(baseline_date)
-ORDER BY (tenant_id, user_id, profile_group, feature_name, baseline_date);
+ORDER BY (tenant_id, user_id, period_type, period_key, profile_group, feature_name, baseline_date);
 ```
 
 `profile_group` 建议包含：
@@ -190,6 +194,56 @@ ORDER BY (tenant_id, user_id, profile_group, feature_name, baseline_date);
 - `volume`
 - `result`
 - `why`
+
+`period_type` 至少支持：
+
+- `global`
+- `rolling`
+- `weekday`
+- `calendar_month`
+- `month_phase`
+- `weekday_month_phase`
+
+## baseline override 表
+
+人工追加和审核通过的 AI 建议进入独立覆盖表。覆盖项只改变 effective baseline，不修改 `ueba_user_baseline` 历史行。
+
+```sql
+CREATE TABLE ueba_baseline_overrides
+(
+    override_id String,
+    tenant_id LowCardinality(String),
+    user_id String DEFAULT '',
+
+    profile_group LowCardinality(String),
+    feature_name LowCardinality(String),
+    period_type LowCardinality(String),
+    period_key String,
+
+    merge_mode LowCardinality(String),
+    override_value JSON,
+
+    source_type LowCardinality(String),
+    source_feedback_id String DEFAULT '',
+    reason String,
+    status LowCardinality(String),
+
+    effective_from DateTime,
+    effective_to Nullable(DateTime),
+    created_by String,
+    reviewed_by String DEFAULT '',
+    reviewed_at Nullable(DateTime),
+
+    model_version String,
+    created_at DateTime DEFAULT now(),
+    updated_at DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY toYYYYMM(created_at)
+ORDER BY (tenant_id, user_id, profile_group, feature_name, period_type, period_key, override_id);
+```
+
+查询 effective baseline 时只合并 `active` 且位于有效期内的覆盖项。同一特征存在多个 active override 时，必须使用确定性的优先级和更新时间顺序，并把最终使用的 `override_id` 写入异常证据。
 
 ## 持久化来源历史表
 
@@ -304,6 +358,10 @@ CREATE TABLE ai_feedback
     target_component LowCardinality(String),
     confidence Float32,
     review_status LowCardinality(String),
+    reviewed_by String DEFAULT '',
+    reviewed_at Nullable(DateTime),
+    applied_override_id String DEFAULT '',
+    applied_version String DEFAULT '',
 
     created_at DateTime DEFAULT now()
 )
@@ -399,7 +457,8 @@ ORDER BY (component, metric_name, metric_time);
 
 - `security_logs` 是事实日志表，不直接存最终安全结论。
 - `ueba_user_daily_features` 是 T+1 特征层，不替代 baseline。
-- `ueba_user_baseline` 是历史画像层，必须记录样本量和置信度。
+- `ueba_user_baseline` 是周期历史画像层，必须记录样本量和置信度，不接受反馈原地修改。
+- `ueba_baseline_overrides` 是人工或审核反馈形成的策略覆盖层，必须可审计、可失效、可撤销。
 - `user_seen_sources` 是新来源判断依据，不应由进程内存替代。
 - `anomaly_events` 是统一异常事件层，规则和 UEBA 不得向外输出两套告警对象。
-- `ai_feedback` 是调优候选，不直接自动改变规则配置。
+- `ai_feedback` 是调优候选；接受后可以生成版本化 override，但不能直接覆盖历史 baseline。

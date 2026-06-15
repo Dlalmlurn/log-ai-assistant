@@ -252,7 +252,10 @@ def build_baselines_from_daily_features(
     daily features are included so baselines reflect the full behaviour history.
     """
     end_date = datetime.now(timezone.utc).date()
-    start_date = end_date - timedelta(days=lookback_days)
+    # Calendar-month seasonality needs cross-year history. Other scopes still
+    # apply their own 90d/30d windows after this wider read.
+    history_days = max(lookback_days, 730)
+    start_date = end_date - timedelta(days=history_days)
 
     rows = storage.query(
         """SELECT * FROM ueba_user_daily_features
@@ -277,121 +280,193 @@ def build_baselines_from_daily_features(
         "night_event_count", "sensitive_action_count", "download_count",
         "permission_change_count", "new_source_count",
     )
-    DAILY_STRING = ("account_type", "common_src_ips", "common_ip_prefixes", "common_hosts", "common_actions")
-
-    import statistics
-    from collections import Counter as _Counter
-
-    def _p50(vals: list[float]) -> float:
-        return float(statistics.median(vals)) if vals else 0
-
-    def _p95(vals: list[float]) -> float:
-        if not vals:
-            return 0
-        svals = sorted(vals)
-        idx = int(len(svals) * 0.95)
-        return float(svals[min(idx, len(svals) - 1)])
-
-    def _p99(vals: list[float]) -> float:
-        if not vals:
-            return 0
-        svals = sorted(vals)
-        idx = int(len(svals) * 0.99)
-        return float(svals[min(idx, len(svals) - 1)])
-
     results: list[UserBaseline] = []
     for user_id, daily_records in by_user.items():
-        feature_dates = sorted({r["feature_date"] for r in daily_records if r.get("feature_date")})
-        trained_from = min(feature_dates) if feature_dates else start_date
-        trained_to = max(feature_dates) if feature_dates else end_date
-        sample_days = len(feature_dates)
-        sample_count = sum(int(r.get("login_count", 0) or 0) for r in daily_records)
-
-        account_type = "unknown"
-        who: dict[str, Any] = {"user_id": user_id, "account_type": "unknown"}
-        time: dict[str, Any] = {}
-        location: dict[str, Any] = {}
-        access: dict[str, Any] = {}
-        volume: dict[str, Any] = {}
-        result: dict[str, Any] = {}
-        why: dict[str, Any] = {}
-
-        for field in DAILY_NUMERIC:
-            vals = [float(r.get(field, 0) or 0) for r in daily_records]
-            if not vals:
-                continue
-            mu = sum(vals) / len(vals)
-            if len(vals) > 1:
-                sigma = (sum((v - mu) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5
-            else:
-                sigma = 0.0
-            feature_stats = {"mean": round(mu, 4), "std": round(sigma, 4), "p50": round(_p50(vals), 4),
-                             "p95": round(_p95(vals), 4), "p99": round(_p99(vals), 4)}
-
-            if field in ("login_count", "success_login_count", "failed_login_count", "night_event_count"):
-                result[field] = feature_stats
-            elif field in ("distinct_src_ip_count", "distinct_host_count"):
-                location[field] = feature_stats
-            elif field in ("distinct_action_count", "sensitive_action_count", "download_count", "permission_change_count"):
-                access[field] = feature_stats
-            else:
-                volume[field] = feature_stats
-
-        if daily_records:
-            ac = daily_records[0].get("account_type") or "unknown"
-            account_type = str(ac)
-            who["account_type"] = account_type
-
-        if feature_dates:
-            time["active_dates"] = [d.isoformat() for d in feature_dates]
-            time["sample_days"] = sample_days
-
-        # --- multi-factor confidence -------------------------------------------
-        # factor 1: days coverage (40%)
-        days_ratio = sample_days / max(lookback_days, sample_days) if lookback_days > 0 else 0
-        days_score = min(1.0, sample_days / 3)  # 3 days = full score
-
-        # factor 2: sample volume, log-scale (30%)
-        volume_target = 50
-        log_sample = __import__("math").log10(max(sample_count, 1))
-        log_target = __import__("math").log10(volume_target)
-        volume_score = min(1.0, log_sample / log_target) if log_target > 0 else 0
-
-        # factor 3: feature coverage (30%)
-        all_features: dict[str, Any] = {}
-        for p in (who, time, location, access, volume, result):
-            all_features.update(p)
-        filled = sum(1 for v in all_features.values() if v is not None and v not in ("", [], {}))
-        total_feats = max(len(all_features), 1)
-        feature_score = filled / total_feats
-
-        confidence = round(0.40 * days_score + 0.30 * volume_score + 0.30 * feature_score, 2)
-        confidence = max(0.05, min(0.95, confidence))
-        fallback = "peer_group" if confidence < 0.3 else "none"
-
-        baseline = UserBaseline(
-            baseline_date=datetime.now(timezone.utc).date(),
-            tenant_id=tenant_id,
-            user_id=user_id,
-            model_version="baseline-v1",
-            trained_from=trained_from,
-            trained_to=trained_to,
-            sample_days=sample_days,
-            sample_count=sample_count,
-            baseline_confidence=confidence,
-            who_profile=who,
-            time_profile=time,
-            location_profile=location,
-            access_profile=access,
-            volume_profile=volume,
-            result_profile=result,
-            why_profile=why,
-            fallback_level=fallback,
-            created_at=datetime.now(timezone.utc),
-        )
-        results.append(baseline)
+        for period_type, period_key, period_records in _period_record_sets(
+            daily_records,
+            end_date,
+            lookback_days=lookback_days,
+        ):
+            results.append(
+                _build_daily_feature_baseline(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    daily_records=period_records,
+                    period_type=period_type,
+                    period_key=period_key,
+                    lookback_days=lookback_days,
+                    numeric_fields=DAILY_NUMERIC,
+                )
+            )
 
     return results
+
+
+def _period_record_sets(
+    daily_records: list[dict[str, Any]],
+    end_date: Any,
+    *,
+    lookback_days: int,
+) -> list[tuple[str, str, list[dict[str, Any]]]]:
+    from src.ueba.effective import WEEKDAYS, month_phase
+
+    recent_records = [
+        row
+        for row in daily_records
+        if row.get("feature_date") and row["feature_date"] >= end_date - timedelta(days=lookback_days - 1)
+    ]
+    scopes: list[tuple[str, str, list[dict[str, Any]]]] = [
+        ("global", "all", recent_records),
+        (
+            "rolling",
+            "30d",
+            [
+                row
+                for row in daily_records
+                if row.get("feature_date") and row["feature_date"] >= end_date - timedelta(days=29)
+            ],
+        ),
+    ]
+    for weekday_index, weekday in enumerate(WEEKDAYS):
+        rows = [row for row in recent_records if row.get("feature_date") and row["feature_date"].weekday() == weekday_index]
+        if rows:
+            scopes.append(("weekday", weekday, rows))
+    for month in sorted({row["feature_date"].month for row in daily_records if row.get("feature_date")}):
+        rows = [row for row in daily_records if row.get("feature_date") and row["feature_date"].month == month]
+        if len({row["feature_date"].year for row in rows}) >= 2:
+            scopes.append(("calendar_month", str(month), rows))
+    for phase in ("month_start", "month_middle", "month_end"):
+        rows = [row for row in recent_records if row.get("feature_date") and month_phase(row["feature_date"]) == phase]
+        if rows:
+            scopes.append(("month_phase", phase, rows))
+    for weekday_index, weekday in enumerate(WEEKDAYS):
+        for phase in ("month_start", "month_middle", "month_end"):
+            rows = [
+                row
+                for row in recent_records
+                if row.get("feature_date")
+                and row["feature_date"].weekday() == weekday_index
+                and month_phase(row["feature_date"]) == phase
+            ]
+            if rows:
+                scopes.append(("weekday_month_phase", f"{weekday}:{phase}", rows))
+    return [(period_type, period_key, rows) for period_type, period_key, rows in scopes if rows]
+
+
+def _build_daily_feature_baseline(
+    *,
+    tenant_id: str,
+    user_id: str,
+    daily_records: list[dict[str, Any]],
+    period_type: str,
+    period_key: str,
+    lookback_days: int,
+    numeric_fields: tuple[str, ...],
+) -> UserBaseline:
+    import math
+    import statistics
+
+    feature_dates = sorted({row["feature_date"] for row in daily_records if row.get("feature_date")})
+    trained_from = min(feature_dates)
+    trained_to = max(feature_dates)
+    sample_days = len(feature_dates)
+    sample_count = sum(int(row.get("login_count", 0) or 0) for row in daily_records)
+
+    who: dict[str, Any] = {
+        "user_id": user_id,
+        "account_type": str(daily_records[0].get("account_type") or "unknown"),
+    }
+    time_profile: dict[str, Any] = {
+        "active_dates": [item.isoformat() for item in feature_dates],
+        "sample_days": sample_days,
+    }
+    active_hours = [
+        value.hour
+        for row in daily_records
+        for value in (row.get("first_seen_time"), row.get("last_seen_time"))
+        if isinstance(value, datetime)
+    ]
+    if active_hours:
+        time_profile["active_hours"] = _active_hour_ranges(active_hours)
+
+    location: dict[str, Any] = {}
+    access: dict[str, Any] = {}
+    volume: dict[str, Any] = {}
+    result: dict[str, Any] = {}
+    why: dict[str, Any] = {}
+
+    for field in numeric_fields:
+        values = [float(row.get(field, 0) or 0) for row in daily_records]
+        mean = sum(values) / len(values)
+        std = statistics.stdev(values) if len(values) > 1 else 0.0
+        stats = {
+            "mean": round(mean, 4),
+            "std": round(std, 4),
+            "p50": round(_percentile(values, 0.50), 4),
+            "p95": round(_percentile(values, 0.95), 4),
+            "p99": round(_percentile(values, 0.99), 4),
+        }
+        if field in ("login_count", "success_login_count", "failed_login_count", "night_event_count"):
+            result[field] = stats
+        elif field in ("distinct_src_ip_count", "distinct_host_count"):
+            location[field] = stats
+        elif field in ("distinct_action_count", "sensitive_action_count", "download_count", "permission_change_count"):
+            access[field] = stats
+        else:
+            volume[field] = stats
+
+    for field, profile, feature_name in (
+        ("common_src_ips", location, "common_ips"),
+        ("common_ip_prefixes", location, "common_ip_prefixes"),
+        ("common_hosts", location, "common_hosts"),
+        ("common_actions", access, "common_actions"),
+    ):
+        counter: Counter[str] = Counter()
+        for row in daily_records:
+            counter.update(str(item) for item in row.get(field, []) if item)
+        if counter:
+            profile[feature_name] = {
+                "common_values": _top_n(counter, 10),
+                "value_histogram": dict(counter),
+            }
+
+    days_score = min(1.0, sample_days / 5)
+    volume_score = min(1.0, math.log10(max(sample_count, 1)) / math.log10(50))
+    profiles = (who, time_profile, location, access, volume, result)
+    feature_values = [value for profile in profiles for value in profile.values()]
+    feature_score = sum(value not in (None, "", [], {}) for value in feature_values) / max(len(feature_values), 1)
+    confidence = max(0.05, min(0.95, round(0.4 * days_score + 0.3 * volume_score + 0.3 * feature_score, 2)))
+
+    return UserBaseline(
+        baseline_date=datetime.now(timezone.utc).date(),
+        tenant_id=tenant_id,
+        user_id=user_id,
+        model_version=f"baseline-v2-{period_type}-{period_key}",
+        period_type=period_type,
+        period_key=period_key,
+        trained_from=trained_from,
+        trained_to=trained_to,
+        sample_days=sample_days,
+        sample_count=sample_count,
+        baseline_confidence=confidence,
+        who_profile=who,
+        time_profile=time_profile,
+        location_profile=location,
+        access_profile=access,
+        volume_profile=volume,
+        result_profile=result,
+        why_profile=why,
+        fallback_level="peer_group" if confidence < 0.3 else "none",
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+def _percentile(values: list[float], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(int(len(ordered) * fraction), len(ordered) - 1)
+    return float(ordered[index])
 
 
 def build_baselines_from_logs(logs: list[dict[str, Any]]) -> list[UserBaseline]:
