@@ -18,6 +18,10 @@ HIGH_RISK_LABEL_HINTS = (
     "lateral_movement",
 )
 
+# Number of manifest event_ids sampled per (tenant, source) group to estimate the
+# end-to-end traceability rate from manifest to security_logs.
+TRACEABILITY_SAMPLE_SIZE = 50
+
 
 def load_manifest_rows(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -41,6 +45,8 @@ def build_data_quality_metrics(
     metric_date: date | None = None,
 ) -> list[DataQualityMetric]:
     rows = load_manifest_rows(manifest_path)
+    if metric_date is not None:
+        rows = [row for row in rows if _manifest_row_date(row) == metric_date]
     if not rows:
         return []
 
@@ -111,6 +117,7 @@ def build_data_quality_metrics(
             missing_action_rate=_rate(stats.get("missing_action_count"), missing_denominator),
             missing_result_rate=_rate(stats.get("missing_result_count"), missing_denominator),
             parse_error_rate=_rate(parse_error_count, parse_error_denominator),
+            event_id_traceability_rate=_group_traceability_rate(storage, items),
             created_at=created_at,
         )
         metrics.append(metric)
@@ -169,6 +176,30 @@ def verify_manifest_event_ids(
         "missing_count": len(missing_event_ids),
         "missing_event_ids": missing_event_ids,
     }
+
+
+def _group_traceability_rate(storage: Any, items: list[dict[str, Any]]) -> float:
+    """Estimate how many sampled manifest event_ids are traceable to security_logs.
+
+    Returns 1.0 (treated as "not blocking") when the storage adapter cannot resolve
+    event_ids, so older adapters without ``list_logs_by_event_ids`` keep working.
+    """
+
+    lookup = getattr(storage, "list_logs_by_event_ids", None)
+    if lookup is None:
+        return 1.0
+    event_ids = [str(item["event_id"]) for item in items if item.get("event_id")]
+    sampled = event_ids[:TRACEABILITY_SAMPLE_SIZE]
+    if not sampled:
+        return 1.0
+    logs = lookup(sampled)
+    found = {
+        str(log.get("event_id"))
+        for log in logs
+        if isinstance(log, dict) and log.get("event_id")
+    }
+    traced = sum(1 for event_id in sampled if event_id in found)
+    return round(traced / len(sampled), 6)
 
 
 def _reconcile_metric(metric: DataQualityMetric) -> dict[str, Any]:
@@ -243,6 +274,10 @@ def _reconciliation_explanations(
         explanations.append(
             f"parse_error_rate is {metric.parse_error_rate}; parser failures should be sampled before treating the gap as data loss."
         )
+    if metric.event_id_traceability_rate < 1:
+        explanations.append(
+            f"event_id_traceability_rate is {metric.event_id_traceability_rate}; some sampled manifest event_ids were not found in security_logs (silent drop or parser loss)."
+        )
     missing_rates = {
         "missing_event_time_rate": metric.missing_event_time_rate,
         "missing_user_id_rate": metric.missing_user_id_rate,
@@ -267,6 +302,16 @@ def _manifest_metric_date(items: list[dict[str, Any]]) -> date:
         except ValueError:
             continue
     return datetime.now(timezone.utc).date()
+
+
+def _manifest_row_date(item: dict[str, Any]) -> date | None:
+    raw = item.get("timestamp")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
 
 
 def _raw_line_count(items: list[dict[str, Any]]) -> int:

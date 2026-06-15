@@ -19,6 +19,7 @@ from src.config import PROJECT_ROOT, settings
 from src.detection import detect_batch
 from src.detection.worker import AnomalyDetectorWorker, DetectionRunSummary
 from src.health import get_cli_health_payload
+from src.operations.notifications import NotificationService
 from src.parser import normalize_raw_record, run_raw_to_parsed_worker
 from src.report import generate_daily_report
 from src.schemas import AnomalyEvent, NormalizedLog
@@ -148,6 +149,10 @@ def cmd_detect(args: argparse.Namespace) -> None:
     normalized = [NormalizedLog.model_validate(item) for item in logs]
     anomalies = detect_batch(normalized)
     storage.insert_anomalies(anomalies)
+    try:
+        NotificationService(storage).enqueue_anomalies(anomalies)
+    except Exception:
+        pass
     anomaly_docs = [a.model_dump(mode="json") for a in anomalies]
 
     producer = KafkaProducer(

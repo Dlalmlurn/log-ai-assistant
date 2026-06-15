@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import uuid
+from datetime import datetime, timezone
 
 from kafka import KafkaConsumer, KafkaProducer
 
 from src.config import settings
 from src.parser.log_parser import normalize_raw_record
+from src.schemas import ParseFailure
+from src.storage import ClickHouseStorage
 
 
 def run_raw_to_parsed_worker(
@@ -27,6 +31,7 @@ def run_raw_to_parsed_worker(
         bootstrap_servers=settings.kafka_bootstrap_servers,
         value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode("utf-8"),
     )
+    storage = ClickHouseStorage()
 
     count = 0
     for msg in consumer:
@@ -36,8 +41,36 @@ def run_raw_to_parsed_worker(
             count += 1
             if max_messages is not None and count >= max_messages:
                 break
-        except Exception:
-            continue
+        except Exception as exc:
+            raw_payload = json.dumps(msg.value, ensure_ascii=False) if not isinstance(msg.value, str) else msg.value
+            failure = ParseFailure(
+                failure_id=f"parse-{uuid.uuid4()}",
+                occurred_at=datetime.now(timezone.utc),
+                source_topic=settings.kafka_raw_topic,
+                partition=int(msg.partition),
+                offset=int(msg.offset),
+                raw_payload=raw_payload,
+                error_code=type(exc).__name__,
+                error_message=str(exc),
+            )
+            storage.insert_parse_failure(failure)
+            parse_error = normalize_raw_record(
+                {
+                    "event_id": failure.failure_id,
+                    "event_time": failure.occurred_at.isoformat(),
+                    "source_type": "system",
+                    "log_type": "parse_error",
+                    "action": "parse",
+                    "result": "error",
+                    "message": f"parse_error: {exc}",
+                    "raw_log": raw_payload,
+                    "risk_tags": ["parse_error"],
+                    "attrs": {"failure_id": failure.failure_id, "error": str(exc)},
+                },
+                source_type_hint="system",
+            )
+            producer.send(settings.kafka_parsed_topic, parse_error.model_dump(mode="json"))
+            count += 1
 
     producer.flush()
     producer.close()

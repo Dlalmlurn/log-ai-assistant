@@ -90,6 +90,12 @@ def _check_flink() -> bool:
         return False
 
 
+def get_consumer_lag() -> dict[str, int]:
+    """Public accessor for per-consumer-group Kafka lag (used by the operations watermark)."""
+
+    return _get_consumer_lag()
+
+
 def _get_consumer_lag() -> dict[str, int]:
     lags: dict[str, int] = {}
     for group_id, topics in CONSUMER_GROUP_TOPICS.items():

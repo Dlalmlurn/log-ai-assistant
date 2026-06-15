@@ -133,6 +133,23 @@ def test_worker_run_once_inserts_detected_anomalies_and_advances_checkpoint() ->
     assert second.anomalies_inserted == 0
 
 
+def test_notification_enqueue_failure_does_not_rollback_anomaly_insert(monkeypatch) -> None:
+    logs = [build_log(i) for i in range(10)]
+    storage = FakeStorage(logs)
+    monkeypatch.setenv("NOTIFICATION_WEBHOOK_URL", "http://unavailable.test/webhook")
+    worker = AnomalyDetectorWorker(
+        storage=storage,
+        lookback_minutes=5,
+        batch_size=100,
+        clock=lambda: BASE_TIME + timedelta(minutes=1),
+    )
+
+    summary = worker.run_once()
+
+    assert summary.anomalies_inserted > 0
+    assert len(storage.inserted_batches) == 1
+
+
 def test_worker_uses_stable_event_ids_for_detected_anomalies() -> None:
     logs = [build_log(i) for i in range(10)]
     first_storage = FakeStorage(logs)

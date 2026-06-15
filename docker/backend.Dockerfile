@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements/backend.txt
 
 COPY src src
 COPY scripts scripts
+COPY config config
 
 EXPOSE 8000
 
