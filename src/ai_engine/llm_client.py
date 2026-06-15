@@ -74,7 +74,19 @@ class AIAnalyzer:
             "key_reasons": event.reason_codes or event.rule_hits,
             "recommended_actions": ["核查IP归属", "检查账号凭证泄露风险", "审计导出接口访问记录"],
             "confidence": 0.82,
-            "feedback_suggestions": {},
+            # 闭合 AI 反馈环：每条研判产出一条待人工复核的 pending 反馈建议，
+            # 不自动改规则（review_status=pending，target_component=rule）。
+            "feedback_suggestions": {
+                "new_pattern": {
+                    "feedback_type": "new_pattern",
+                    "target_component": "rule",
+                    "suggestion": (
+                        "建议安全分析师复核该高可疑事件，确认是否为真实攻击；"
+                        "若确认误报，可据此评估对应规则权重，但不自动修改生产规则。"
+                    ),
+                    "confidence": 0.6,
+                }
+            },
             "is_mock": True,
         }
 

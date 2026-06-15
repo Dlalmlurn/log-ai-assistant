@@ -21,5 +21,7 @@ def build_anomaly_judgement_prompt(
         "输出字段必须包含: attack_type, risk_level, judgement, key_reasons, recommended_actions, confidence。\n"
         "risk_level 只能是: low, medium, high, critical。confidence 是 0-1 浮点数。\n"
         "输入上下文如下:\n"
-        f"{json.dumps(payload, ensure_ascii=False)}"
+        # baseline/related_logs 可能包含 date、datetime 等非原生 JSON 类型（如 baseline_date），
+        # 用 default=str 兜底序列化，避免真实研判时 json.dumps 抛 TypeError。
+        f"{json.dumps(payload, ensure_ascii=False, default=str)}"
     )
