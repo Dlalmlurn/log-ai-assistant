@@ -167,7 +167,6 @@ services:
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
     container_name: log-ai-anomaly-detector
-    profiles: ["detector"]
     environment:
       CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse}
       CLICKHOUSE_HTTP_PORT: ${CLICKHOUSE_HTTP_PORT:-8123}
@@ -195,16 +194,16 @@ services:
       ]
 
   raw-to-parsed:
-    # Lightweight default normalizer so `docker compose up` ingests end-to-end
-    # without the heavy PyFlink build. Flink remains the formal stream processor
-    # and is enabled with `--profile jobs`; both write parsed_logs with stable
-    # event_id, so ClickHouse ReplacingMergeTree collapses any overlap.
+    # Fallback normalizer for local isolation only. The default formal path uses
+    # Flink; do not enable this together with the default Flink parser unless you
+    # intentionally want duplicate parsed_logs collapsed by ClickHouse.
     build:
       context: .
       dockerfile: docker/backend.Dockerfile
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
     container_name: log-ai-raw-to-parsed
+    profiles: ["fallback"]
     restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS_DOCKER:-kafka:9092}
@@ -279,7 +278,7 @@ services:
       LOG_GENERATOR_MANIFEST: ${LOG_GENERATOR_MANIFEST:-/var/log/app/manifest.jsonl}
       LOG_GENERATOR_CONFIG: ${LOG_GENERATOR_CONFIG:-/app/log-generator/scenarios/default.json}
       LOG_GENERATOR_INTERVAL_SECONDS: ${LOG_GENERATOR_SCALE_INTERVAL_SECONDS:-1}
-      LOG_GENERATOR_BATCH_SIZE: ${LOG_GENERATOR_SCALE_BATCH_SIZE:-50}
+      LOG_GENERATOR_BATCH_SIZE: ${LOG_GENERATOR_SCALE_BATCH_SIZE:-25}
       LOG_GENERATOR_SEED: ${LOG_GENERATOR_SCALE_SEED:-4242}
     volumes:
       - ./logs:/var/log/app
@@ -287,7 +286,6 @@ services:
   flink-submit:
     image: log-ai-assistant-flink-python
     container_name: flink-submit
-    profiles: ["jobs"]
     working_dir: /opt/app
     environment:
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS_DOCKER:-kafka:9092}

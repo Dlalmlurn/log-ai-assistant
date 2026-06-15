@@ -65,12 +65,24 @@ docker compose up --build
 | --- | --- | --- |
 | `kafka` | 流式传输和缓冲层 | `localhost:9092` |
 | `flink-jobmanager` / `flink-taskmanager` | Flink 运行环境 | `http://localhost:8081` |
+| `flink-submit` | 提交正式 `raw_logs -> parsed_logs` Flink 作业 | 容器内运行 |
 | `clickhouse` | 主存储和分析引擎 | `http://localhost:8123` |
 | `filebeat` | 采集 `logs/*.log` 并写入 Kafka `raw_logs` | 容器内运行 |
-| `raw-to-parsed` | 轻量 Python 规范化器，`raw_logs -> parsed_logs`，让默认启动即可端到端入库 | 容器内运行 |
+| `anomaly-detector` | 持续检测 `security_logs` 并写入 `anomaly_events` | 容器内运行 |
 | `backend` | FastAPI API 层 | `http://localhost:8000` |
 | `frontend` | React + Vite 工作台 | `http://localhost:5173` |
 | `log-generator` | 小规模持续生成多源日志样例 | 写入 `logs/` |
+
+默认启动包含 Flink，以保持正式主链路为 `Filebeat -> Kafka -> Flink -> ClickHouse -> FastAPI -> React`。Elasticsearch 和 Kibana 仅在 `legacy-es` profile 中，不进入默认主链路。
+
+如果 `flink:1.18.1` 在当前网络不可拉取，可以在 `.env` 中把 `FLINK_IMAGE` 改为可访问镜像地址，或先在本机预拉取后重新 tag 为 `flink:1.18.1`。
+
+如果使用 Docker Desktop 或脚本执行“拉取全部服务镜像”，可能会触发 legacy profile 中的服务。只拉取默认运行链路时，显式指定服务更稳：
+
+```bash
+docker compose pull kafka kafka-init clickhouse filebeat backend frontend log-generator
+docker compose up --build kafka kafka-init clickhouse log-generator filebeat flink-jobmanager flink-taskmanager flink-submit anomaly-detector backend frontend
+```
 
 默认日志生成器是小流量开发配置，避免压垮普通开发机。大规模日志生成不随默认启动运行，需要显式启用 profile：
 
@@ -78,13 +90,11 @@ docker compose up --build
 docker compose --profile scale up --build
 ```
 
-默认启动用轻量 `raw-to-parsed` 服务把 `raw_logs` 规范化成 `parsed_logs`（ClickHouse 通过 Kafka 引擎表把 `parsed_logs` 落入 `security_logs`），因此 `docker compose up` 即可端到端入库，无需等待重型 PyFlink 镜像。
+`scale` profile 默认生成速率为 `25 条/秒`，约 `1500 条/分钟`。按当前多源 JSON 日志平均约 700B/条估算，约等于 `1.5GB/day` 原始日志量；如果需要更贴近 `1GB/day`，可在 `.env` 中设置 `LOG_GENERATOR_SCALE_BATCH_SIZE=17`。
 
-Flink 是正式流处理器，通过 `jobs` profile 显式提交；它与 `raw-to-parsed` 都写 `parsed_logs`，由于 event_id 稳定，ClickHouse `ReplacingMergeTree` 会折叠重复：
+默认启动通过 Flink 作业把 `raw_logs` 规范化成 `parsed_logs`，ClickHouse 通过 Kafka 引擎表把 `parsed_logs` 落入 `security_logs`。
 
-```bash
-docker compose --profile jobs up flink-submit
-```
+`raw-to-parsed` 仅作为故障隔离或本地 fallback 工具保留在 `fallback` profile 中，不属于默认正式主链路。
 
 测试入口不随默认启动运行，可以按需执行：
 

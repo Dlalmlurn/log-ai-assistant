@@ -76,24 +76,24 @@ const initialLogsQuery: LogsQuery = {
 };
 
 const sourceTypes: Array<{ label: string; value: SourceType | "" }> = [
-  { label: "All sources", value: "" },
+  { label: "全部来源", value: "" },
   { label: "VPN", value: "vpn" },
   { label: "OA", value: "oa" },
   { label: "API", value: "api" },
-  { label: "System", value: "system" },
-  { label: "File", value: "file" },
-  { label: "Database", value: "database" },
-  { label: "Security device", value: "security_device" }
+  { label: "系统", value: "system" },
+  { label: "文件", value: "file" },
+  { label: "数据库", value: "database" },
+  { label: "安全设备", value: "security_device" }
 ];
 
 const resultOptions = ["", "success", "fail", "denied", "error"];
 const alertStatusOptions = ["", "new", "investigating", "closed", "false_positive"];
 const riskLevelOptions: Array<{ label: string; value: RiskLevel | "" }> = [
-  { label: "All risk levels", value: "" },
-  { label: "Low", value: "low" },
-  { label: "Medium", value: "medium" },
-  { label: "High", value: "high" },
-  { label: "Critical", value: "critical" }
+  { label: "全部风险等级", value: "" },
+  { label: "低", value: "low" },
+  { label: "中", value: "medium" },
+  { label: "高", value: "high" },
+  { label: "严重", value: "critical" }
 ];
 
 const initialAlertsQuery: AlertsQuery = {
@@ -116,35 +116,35 @@ function App() {
         <div className="brand">
           <ShieldCheck aria-hidden="true" />
           <div>
-            <strong>Log AI Assistant</strong>
-            <span>Security operations</span>
+            <strong>日志 AI 助手</strong>
+            <span>安全运营工作台</span>
           </div>
         </div>
 
-        <nav className="nav" aria-label="Main navigation">
+        <nav className="nav" aria-label="主导航">
           <button className={page === "logs" ? "active" : ""} type="button" onClick={() => setPage("logs")}>
             <TerminalSquare aria-hidden="true" />
-            Realtime Logs
+            实时日志
           </button>
           <button className={page === "anomalies" ? "active" : ""} type="button" onClick={() => setPage("anomalies")}>
             <AlertCircle aria-hidden="true" />
-            Anomalies
+            异常事件
           </button>
           <button className={page === "users" ? "active" : ""} type="button" onClick={() => setPage("users")}>
             <UserRound aria-hidden="true" />
-            User Profiles
+            用户画像
           </button>
           <button className={page === "ai" ? "active" : ""} type="button" onClick={() => setPage("ai")}>
             <Brain aria-hidden="true" />
-            AI Judgement
+            AI 研判
           </button>
           <button className={page === "reports" ? "active" : ""} type="button" onClick={() => setPage("reports")}>
             <FileText aria-hidden="true" />
-            Daily Reports
+            日报
           </button>
           <button className={page === "status" ? "active" : ""} type="button" onClick={() => setPage("status")}>
             <Activity aria-hidden="true" />
-            System Status
+            系统状态
           </button>
         </nav>
 
@@ -250,25 +250,25 @@ function SystemStatusPage() {
       {
         name: "Kafka",
         ok: health?.kafka ?? false,
-        description: "raw_logs, parsed_logs and anomaly transport",
+        description: "raw_logs、parsed_logs 与异常事件传输",
         icon: RadioTower
       },
       {
         name: "Flink",
         ok: health?.flink ?? false,
-        description: "raw_logs to normalized parsed_logs processing",
+        description: "将 raw_logs 处理为标准化 parsed_logs",
         icon: Activity
       },
       {
         name: "ClickHouse",
         ok: health?.clickhouse ?? false,
-        description: "security_logs persistence and analytics",
+        description: "security_logs 持久化与分析",
         icon: Database
       },
       {
         name: "DashScope",
         ok: health?.dashscope_configured ?? false,
-        description: "AI analysis configuration",
+        description: "AI 分析配置",
         icon: Sparkles
       }
     ];
@@ -280,13 +280,13 @@ function SystemStatusPage() {
   return (
     <section className="page">
       <PageHeader
-        kicker="REQ-001 / REQ-002"
-        title="System Status"
-        description="Live FastAPI health for the formal Filebeat to React pipeline."
+        kicker="系统健康"
+        title="系统状态"
+        description="展示 Filebeat 到 React 全链路的 FastAPI 实时健康状态。"
         action={
           <button className="icon-button primary" type="button" onClick={() => load()} disabled={state.loading}>
             <RefreshCcw aria-hidden="true" className={state.loading ? "spin" : ""} />
-            Refresh
+            刷新
           </button>
         }
       />
@@ -295,11 +295,11 @@ function SystemStatusPage() {
 
       <div className="status-summary">
         <div>
-          <span className="eyebrow">Pipeline readiness</span>
-          <strong>{pipelineReady ? "Operational" : "Attention needed"}</strong>
-          <p>{onlineCount} of {services.length} checks are currently passing.</p>
+          <span className="eyebrow">链路就绪度</span>
+          <strong>{pipelineReady ? "运行正常" : "需要关注"}</strong>
+          <p>当前 {services.length} 项检查中有 {onlineCount} 项通过。</p>
         </div>
-        <StatusPill ok={pipelineReady} label={pipelineReady ? "Data path available" : "Data path degraded"} />
+        <StatusPill ok={pipelineReady} label={pipelineReady ? "数据链路可用" : "数据链路降级"} />
       </div>
 
       <div className="status-grid">
@@ -311,50 +311,50 @@ function SystemStatusPage() {
       <div className="metrics-band">
         <Metric
           icon={Clock3}
-          label="Latest ingest"
+          label="最近写入"
           value={formatDateTime(state.data?.latest_log_ingest_time)}
-          hint="Most recent security_logs ingest_time"
+          hint="最新 security_logs ingest_time"
         />
         <Metric
           icon={BarChart3}
-          label="Anomalies"
+          label="异常事件"
           value={formatNumber(statsState.data?.anomaly_count)}
-          hint={`${formatNumber(statsState.data?.high_risk_count)} high or critical`}
+          hint={`${formatNumber(statsState.data?.high_risk_count)} 个高危或严重`}
         />
         <Metric
           icon={Server}
-          label="Log volume"
+          label="日志量"
           value={formatNumber(statsState.data?.log_count)}
-          hint={`Latest ${formatDateTime(statsState.data?.latest_log_ingest_time)}`}
+          hint={`最近 ${formatDateTime(statsState.data?.latest_log_ingest_time)}`}
         />
       </div>
 
       <div className="metrics-band">
         <Metric
           icon={Brain}
-          label="AI pending"
+          label="AI 待处理"
           value={formatNumber(statsState.data?.ai_pending_count)}
-          hint="Anomalies awaiting AI judgement"
+          hint="等待 AI 研判的异常事件"
         />
         <Metric
           icon={UserRound}
-          label="Baseline coverage"
+          label="基线覆盖"
           value={formatNumber(statsState.data?.baseline_user_count)}
-          hint="Users with a stored behavior baseline"
+          hint="已有行为基线的用户数"
         />
         <Metric
           icon={FileText}
-          label="Latest daily report"
-          value={statsState.data?.latest_report_date ?? "none"}
-          hint="Most recent daily_security_reports date"
+          label="最新日报"
+          value={statsState.data?.latest_report_date ?? "无"}
+          hint="最新 daily_security_reports 日期"
         />
       </div>
 
       {statsState.error ? <ErrorBanner message={statsState.error} /> : null}
 
       <div className="section-title">
-        <h2>User Risk Ranking</h2>
-        <span>Top users from /api/v1/stats/users/risk</span>
+        <h2>用户风险排行</h2>
+        <span>来自 /api/v1/stats/users/risk 的高风险用户</span>
       </div>
       <div className="compact-list">
         {riskState.data?.items.map((item) => (
@@ -364,37 +364,37 @@ function SystemStatusPage() {
               <span>{formatDateTime(item.latest_event_time)}</span>
             </div>
             <div className="tag-list">
-              <span>{item.anomaly_count} anomalies</span>
-              <span>{item.high_risk_count} high+</span>
-              <span>max {item.max_risk_score}</span>
+              <span>{item.anomaly_count} 个异常</span>
+              <span>{item.high_risk_count} 个高危+</span>
+              <span>最高 {item.max_risk_score}</span>
             </div>
           </article>
         ))}
-        {!riskState.loading && riskState.data?.items.length === 0 ? <EmptyState title="No ranked users" detail="User risk ranking is empty until anomaly events include user_id." /> : null}
+        {!riskState.loading && riskState.data?.items.length === 0 ? <EmptyState title="暂无排行用户" detail="异常事件包含 user_id 后，用户风险排行会在这里展示。" /> : null}
         {riskState.error ? <ErrorBanner message={riskState.error} /> : null}
       </div>
 
       <div className="section-title">
-        <h2>Consumer Lag</h2>
-        <span>Kafka groups from /api/v1/health</span>
+        <h2>消费延迟</h2>
+        <span>来自 /api/v1/health 的 Kafka 消费组</span>
       </div>
-      <div className="lag-table" role="table" aria-label="Consumer lag">
+      <div className="lag-table" role="table" aria-label="消费延迟">
         <div role="row" className="lag-row lag-head">
-          <span role="columnheader">Group</span>
-          <span role="columnheader">Lag</span>
-          <span role="columnheader">State</span>
+          <span role="columnheader">消费组</span>
+          <span role="columnheader">延迟</span>
+          <span role="columnheader">状态</span>
         </div>
         {Object.entries(state.data?.consumer_lag ?? {}).map(([group, lag]) => (
           <div role="row" className="lag-row" key={group}>
             <span role="cell">{group}</span>
             <span role="cell">{lag.toLocaleString()}</span>
             <span role="cell">
-              <StatusPill ok={lag === 0} label={lag === 0 ? "Caught up" : "Backlog"} />
+              <StatusPill ok={lag === 0} label={lag === 0 ? "已追平" : "有积压"} />
             </span>
           </div>
         ))}
         {state.data && Object.keys(state.data.consumer_lag).length === 0 ? (
-          <EmptyState title="No lag groups reported" detail="The health endpoint returned an empty consumer_lag object." />
+          <EmptyState title="暂无消费组延迟" detail="健康检查接口返回的 consumer_lag 为空。" />
         ) : null}
       </div>
     </section>
@@ -469,18 +469,18 @@ function RealtimeLogsPage() {
   return (
     <section className="page">
       <PageHeader
-        kicker="REQ-002 / REQ-006"
-        title="Realtime Logs"
-        description="Structured events queried through FastAPI from the ClickHouse-backed runtime path."
+        kicker="实时日志"
+        title="实时日志"
+        description="通过 FastAPI 查询由 ClickHouse 支撑的结构化安全事件。"
         action={
           <div className="header-actions">
             <button className="icon-button" type="button" onClick={() => setLive((value) => !value)}>
               {live ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}
-              {live ? "Pause live" : "Resume live"}
+              {live ? "暂停轮询" : "恢复轮询"}
             </button>
             <button className="icon-button primary" type="button" onClick={() => load(query)} disabled={state.loading}>
               <RefreshCcw aria-hidden="true" className={state.loading ? "spin" : ""} />
-              Refresh
+              刷新
             </button>
           </div>
         }
@@ -496,7 +496,7 @@ function RealtimeLogsPage() {
         }}
       >
         <label>
-          <span>Source</span>
+          <span>来源</span>
           <select
             value={draft.source_type}
             onChange={(event) => setDraft((current) => ({ ...current, source_type: event.target.value as SourceType | "" }))}
@@ -510,7 +510,7 @@ function RealtimeLogsPage() {
         </label>
 
         <label>
-          <span>User ID</span>
+          <span>用户 ID</span>
           <input
             value={draft.user_id}
             placeholder="alice"
@@ -519,7 +519,7 @@ function RealtimeLogsPage() {
         </label>
 
         <label>
-          <span>Source IP</span>
+          <span>源 IP</span>
           <input
             value={draft.src_ip}
             placeholder="10.0.1.20"
@@ -528,18 +528,18 @@ function RealtimeLogsPage() {
         </label>
 
         <label>
-          <span>Result</span>
+          <span>结果</span>
           <select value={draft.result} onChange={(event) => setDraft((current) => ({ ...current, result: event.target.value as LogsQuery["result"] }))}>
             {resultOptions.map((option) => (
               <option key={option || "all"} value={option}>
-                {option || "All results"}
+                {option ? formatResult(option) : "全部结果"}
               </option>
             ))}
           </select>
         </label>
 
         <label>
-          <span>Start time</span>
+          <span>开始时间</span>
           <input
             type="datetime-local"
             value={toDatetimeLocalInput(draft.start_time)}
@@ -548,7 +548,7 @@ function RealtimeLogsPage() {
         </label>
 
         <label>
-          <span>End time</span>
+          <span>结束时间</span>
           <input
             type="datetime-local"
             value={toDatetimeLocalInput(draft.end_time)}
@@ -557,7 +557,7 @@ function RealtimeLogsPage() {
         </label>
 
         <label>
-          <span>Limit</span>
+          <span>条数</span>
           <select
             value={draft.limit}
             onChange={(event) => setDraft((current) => ({ ...current, limit: Number(event.target.value) }))}
@@ -573,23 +573,23 @@ function RealtimeLogsPage() {
         <div className="filter-actions">
           <button className="icon-button primary" type="submit">
             <Search aria-hidden="true" />
-            Apply
+            应用
           </button>
           <button className="icon-button" type="button" onClick={clearFilters}>
             <Filter aria-hidden="true" />
-            Clear
+            清空
           </button>
         </div>
       </form>
 
       <div className="table-toolbar">
         <div>
-          <strong>{state.data?.total.toLocaleString() ?? "0"} events</strong>
-          <span>{formatResultRange(query.offset, query.limit, state.data?.total ?? 0, state.data?.items.length ?? 0)} from /api/v1/logs</span>
+          <strong>{state.data?.total.toLocaleString() ?? "0"} 条事件</strong>
+          <span>{formatResultRange(query.offset, query.limit, state.data?.total ?? 0, state.data?.items.length ?? 0)}，来自 /api/v1/logs</span>
         </div>
         <div className="toolbar-meta">
-          <StatusPill ok={live} label={live ? "Live polling" : "Paused"} />
-          <span>{state.updatedAt ? `Updated ${state.updatedAt.toLocaleTimeString()}` : "Waiting for data"}</span>
+          <StatusPill ok={live} label={live ? "实时轮询" : "已暂停"} />
+          <span>{state.updatedAt ? `更新于 ${state.updatedAt.toLocaleTimeString()}` : "等待数据"}</span>
         </div>
       </div>
 
@@ -597,14 +597,14 @@ function RealtimeLogsPage() {
         <table className="log-table">
           <thead>
             <tr>
-              <th>Event time</th>
-              <th>Source</th>
-              <th>User</th>
-              <th>Source IP</th>
-              <th>Action</th>
-              <th>Result</th>
-              <th>Message</th>
-              <th>Risk tags</th>
+              <th>事件时间</th>
+              <th>来源</th>
+              <th>用户</th>
+              <th>源 IP</th>
+              <th>动作</th>
+              <th>结果</th>
+              <th>消息</th>
+              <th>风险标签</th>
             </tr>
           </thead>
           <tbody>
@@ -615,16 +615,16 @@ function RealtimeLogsPage() {
                   <small>{log.event_id}</small>
                 </td>
                 <td>{formatSource(log.source_type)}</td>
-                <td>{log.user_id || "unknown"}</td>
-                <td>{log.src_ip || "n/a"}</td>
+                <td>{log.user_id || "未知"}</td>
+                <td>{log.src_ip || "无"}</td>
                 <td>{log.action}</td>
                 <td>
-                  <span className={`status-chip ${statusTone(log.result)}`}>{log.result}</span>
+                  <span className={`status-chip ${statusTone(log.result)}`}>{formatResult(log.result)}</span>
                 </td>
                 <td className="message-cell">{log.message}</td>
                 <td>
                   <div className="tag-list">
-                    {log.risk_tags.length > 0 ? log.risk_tags.map((tag) => <span key={tag}>{tag}</span>) : <span className="muted">none</span>}
+                    {log.risk_tags.length > 0 ? log.risk_tags.map((tag) => <span key={tag}>{tag}</span>) : <span className="muted">无</span>}
                   </div>
                 </td>
               </tr>
@@ -634,7 +634,7 @@ function RealtimeLogsPage() {
 
         {state.loading && !state.data ? <TableSkeleton /> : null}
         {!state.loading && state.data?.items.length === 0 ? (
-          <EmptyState title="No logs matched" detail="Adjust filters or confirm that Filebeat, Flink, and ClickHouse are moving current data." />
+          <EmptyState title="没有匹配的日志" detail="请调整筛选条件，或确认 Filebeat、Flink 与 ClickHouse 正在处理当前数据。" />
         ) : null}
       </div>
 
@@ -645,16 +645,16 @@ function RealtimeLogsPage() {
           disabled={!canGoPrevious}
           onClick={() => setQuery((current) => ({ ...current, offset: Math.max(0, current.offset - current.limit) }))}
         >
-          Previous
+          上一页
         </button>
-        <span>Offset {query.offset.toLocaleString()}</span>
+        <span>偏移 {query.offset.toLocaleString()}</span>
         <button
           className="icon-button"
           type="button"
           disabled={!canGoNext}
           onClick={() => setQuery((current) => ({ ...current, offset: current.offset + current.limit }))}
         >
-          Next
+          下一页
         </button>
       </div>
     </section>
@@ -758,13 +758,13 @@ function AlertsPage() {
   return (
     <section className="page">
       <PageHeader
-        kicker="REQ-004 / REQ-006 / REQ-008"
-        title="Anomalies"
-        description="Abnormal events queried through FastAPI from the formal ClickHouse target path."
+        kicker="异常检测"
+        title="异常事件"
+        description="通过 FastAPI 查询写入 ClickHouse 的异常检测结果。"
         action={
           <button className="icon-button primary" type="button" onClick={() => loadAlerts(query)} disabled={listState.loading}>
             <RefreshCcw aria-hidden="true" className={listState.loading ? "spin" : ""} />
-            Refresh
+            刷新
           </button>
         }
       />
@@ -779,7 +779,7 @@ function AlertsPage() {
         }}
       >
         <label>
-          <span>Risk</span>
+          <span>风险</span>
           <select
             value={draft.risk_level}
             onChange={(event) => setDraft((current) => ({ ...current, risk_level: event.target.value as RiskLevel | "" }))}
@@ -793,7 +793,7 @@ function AlertsPage() {
         </label>
 
         <label>
-          <span>User ID</span>
+          <span>用户 ID</span>
           <input
             value={draft.user_id}
             placeholder="alice"
@@ -802,7 +802,7 @@ function AlertsPage() {
         </label>
 
         <label>
-          <span>Reason code</span>
+          <span>原因码</span>
           <input
             value={draft.reason_code}
             placeholder="new_source_ip"
@@ -811,18 +811,18 @@ function AlertsPage() {
         </label>
 
         <label>
-          <span>Status</span>
+          <span>状态</span>
           <select value={draft.status} onChange={(event) => setDraft((current) => ({ ...current, status: event.target.value }))}>
             {alertStatusOptions.map((option) => (
               <option key={option || "all"} value={option}>
-                {option || "All statuses"}
+                {option ? formatAlertStatus(option) : "全部状态"}
               </option>
             ))}
           </select>
         </label>
 
         <label>
-          <span>Start time</span>
+          <span>开始时间</span>
           <input
             type="datetime-local"
             value={toDatetimeLocalInput(draft.start_time)}
@@ -831,7 +831,7 @@ function AlertsPage() {
         </label>
 
         <label>
-          <span>End time</span>
+          <span>结束时间</span>
           <input
             type="datetime-local"
             value={toDatetimeLocalInput(draft.end_time)}
@@ -840,7 +840,7 @@ function AlertsPage() {
         </label>
 
         <label>
-          <span>Limit</span>
+          <span>条数</span>
           <select
             value={draft.limit}
             onChange={(event) => setDraft((current) => ({ ...current, limit: Number(event.target.value) }))}
@@ -856,24 +856,24 @@ function AlertsPage() {
         <div className="filter-actions">
           <button className="icon-button primary" type="submit">
             <Search aria-hidden="true" />
-            Apply
+            应用
           </button>
           <button className="icon-button" type="button" onClick={clearFilters}>
             <Filter aria-hidden="true" />
-            Clear
+            清空
           </button>
         </div>
       </form>
 
       <div className="alerts-layout">
-        <section className="alerts-list-panel" aria-label="Anomaly list">
+        <section className="alerts-list-panel" aria-label="异常事件列表">
           <div className="table-toolbar">
             <div>
-              <strong>{listState.data?.total.toLocaleString() ?? "0"} anomalies</strong>
-              <span>{formatResultRange(query.offset, query.limit, listState.data?.total ?? 0, listState.data?.items.length ?? 0)} from /api/v1/anomalies</span>
+              <strong>{listState.data?.total.toLocaleString() ?? "0"} 个异常</strong>
+              <span>{formatResultRange(query.offset, query.limit, listState.data?.total ?? 0, listState.data?.items.length ?? 0)}，来自 /api/v1/anomalies</span>
             </div>
             <div className="toolbar-meta">
-              <span>{listState.updatedAt ? `Updated ${listState.updatedAt.toLocaleTimeString()}` : "Waiting for data"}</span>
+              <span>{listState.updatedAt ? `更新于 ${listState.updatedAt.toLocaleTimeString()}` : "等待数据"}</span>
             </div>
           </div>
 
@@ -881,12 +881,12 @@ function AlertsPage() {
             <table className="log-table alerts-table">
               <thead>
                 <tr>
-                  <th>Detect time</th>
-                  <th>Risk</th>
-                  <th>User</th>
-                  <th>Source IP</th>
-                  <th>Rule hits</th>
-                  <th>Status</th>
+                  <th>检测时间</th>
+                  <th>风险</th>
+                  <th>用户</th>
+                  <th>源 IP</th>
+                  <th>命中规则</th>
+                  <th>状态</th>
                 </tr>
               </thead>
               <tbody>
@@ -908,18 +908,18 @@ function AlertsPage() {
                       <small>{alert.event_id}</small>
                     </td>
                     <td>
-                      <span className={`risk-chip ${riskTone(alert.risk_level)}`}>{alert.risk_level}</span>
-                      <small>score {alert.risk_score}</small>
+                      <span className={`risk-chip ${riskTone(alert.risk_level)}`}>{formatRiskLevel(alert.risk_level)}</span>
+                      <small>分数 {alert.risk_score}</small>
                     </td>
-                    <td>{alert.user_id || "unknown"}</td>
-                    <td>{alert.src_ip || "n/a"}</td>
+                    <td>{alert.user_id || "未知"}</td>
+                    <td>{alert.src_ip || "无"}</td>
                     <td>
                       <div className="tag-list">
-                        {alert.rule_hits.length > 0 ? alert.rule_hits.map((rule) => <span key={rule}>{rule}</span>) : <span className="muted">none</span>}
+                        {alert.rule_hits.length > 0 ? alert.rule_hits.map((rule) => <span key={rule}>{rule}</span>) : <span className="muted">无</span>}
                       </div>
                     </td>
                     <td>
-                      <span className={`status-chip ${alertStatusTone(alert.status)}`}>{alert.status}</span>
+                      <span className={`status-chip ${alertStatusTone(alert.status)}`}>{formatAlertStatus(alert.status)}</span>
                     </td>
                   </tr>
                 ))}
@@ -928,7 +928,7 @@ function AlertsPage() {
 
             {listState.loading && !listState.data ? <TableSkeleton /> : null}
             {!listState.loading && listState.data?.items.length === 0 ? (
-              <EmptyState title="No anomalies matched" detail="Adjust filters or confirm that the detection pipeline has written anomaly events." />
+              <EmptyState title="没有匹配的异常" detail="请调整筛选条件，或确认检测链路已经写入异常事件。" />
             ) : null}
           </div>
 
@@ -939,16 +939,16 @@ function AlertsPage() {
               disabled={!canGoPrevious}
               onClick={() => setQuery((current) => ({ ...current, offset: Math.max(0, current.offset - current.limit) }))}
             >
-              Previous
+              上一页
             </button>
-            <span>Offset {query.offset.toLocaleString()}</span>
+            <span>偏移 {query.offset.toLocaleString()}</span>
             <button
               className="icon-button"
               type="button"
               disabled={!canGoNext}
               onClick={() => setQuery((current) => ({ ...current, offset: current.offset + current.limit }))}
             >
-              Next
+              下一页
             </button>
           </div>
         </section>
@@ -993,7 +993,7 @@ function AlertDetailPanel({
       .then((report) => {
         setActionState({
           loading: false,
-          message: `AI judgement stored (${report.is_mock ? "mock" : report.model_name}).`,
+          message: `AI 研判已保存（${report.is_mock ? "模拟结果" : report.model_name}）。`,
           error: null
         });
         onRefresh();
@@ -1013,11 +1013,11 @@ function AlertDetailPanel({
       judgement_id: typeof detail.ai_judgement.judgement_id === "string" ? detail.ai_judgement.judgement_id : undefined,
       feedback_type: "false_positive",
       target_component: "scoring",
-      suggestion: "Analyst marked this anomaly for false-positive review.",
+      suggestion: "分析员将此异常标记为误报复核。",
       confidence: 1
     })
       .then((feedback) => {
-        setActionState({ loading: false, message: `Feedback ${feedback.review_status}.`, error: null });
+        setActionState({ loading: false, message: `反馈已提交，当前状态：${formatReviewStatus(feedback.review_status)}。`, error: null });
       })
       .catch((error: unknown) => setActionState({ loading: false, message: null, error: formatError(error) }));
   };
@@ -1025,7 +1025,7 @@ function AlertDetailPanel({
   if (!selectedAlertId) {
     return (
       <aside className="detail-panel">
-        <EmptyState title="Select an anomaly" detail="Anomaly detail will show the evidence chain, related logs, baseline, and AI report from FastAPI." />
+        <EmptyState title="选择一个异常事件" detail="详情会展示证据链、相关日志、基线与 FastAPI 返回的 AI 报告。" />
       </aside>
     );
   }
@@ -1034,10 +1034,10 @@ function AlertDetailPanel({
     <aside className="detail-panel">
       <div className="detail-panel-header">
         <div>
-          <span className="eyebrow">Anomaly detail</span>
+          <span className="eyebrow">异常详情</span>
           <h2>{detail?.anomaly.event_id ?? selectedAlertId}</h2>
         </div>
-        {detail ? <StatusPill ok={detail.anomaly.ai_status === "analyzed"} label={detail.anomaly.ai_status} /> : null}
+        {detail ? <StatusPill ok={detail.anomaly.ai_status === "analyzed"} label={formatAIStatus(detail.anomaly.ai_status)} /> : null}
       </div>
 
       {state.error ? <ErrorBanner message={state.error} /> : null}
@@ -1049,66 +1049,66 @@ function AlertDetailPanel({
         <div className="detail-stack">
           <section className="detail-section">
             <div className="detail-section-title">
-              <h3>Actions</h3>
-              <span>{detail.anomaly.ai_status}</span>
+              <h3>操作</h3>
+              <span>{formatAIStatus(detail.anomaly.ai_status)}</span>
             </div>
             <div className="inline-actions">
               <button className="icon-button primary" type="button" onClick={runAIJudgement} disabled={actionState.loading}>
                 <Brain aria-hidden="true" />
-                Analyze
+                分析
               </button>
               <button className="icon-button" type="button" onClick={submitFalsePositiveFeedback} disabled={actionState.loading}>
                 <CheckCircle2 aria-hidden="true" />
-                False positive
+                标记误报
               </button>
             </div>
           </section>
 
           <section className="detail-section">
             <div className="detail-section-title">
-              <h3>Risk Summary</h3>
-              <span>{detail.anomaly.risk_level}</span>
+              <h3>风险摘要</h3>
+              <span>{formatRiskLevel(detail.anomaly.risk_level)}</span>
             </div>
             <div className="metrics-band compact-metrics">
-              <Metric icon={BarChart3} label="Risk score" value={String(detail.anomaly.risk_score)} hint="0 to 100" />
-              <Metric icon={ListFilter} label="Reason codes" value={String(detail.anomaly.reason_codes.length)} hint={detail.anomaly.reason_codes.slice(0, 2).join(", ") || "none"} />
-              <Metric icon={Sparkles} label="AI status" value={detail.anomaly.ai_status} hint={isEmptyRecord(detail.ai_judgement) ? "No judgement stored" : "Judgement available"} />
+              <Metric icon={BarChart3} label="风险分数" value={String(detail.anomaly.risk_score)} hint="0 到 100" />
+              <Metric icon={ListFilter} label="原因码" value={String(detail.anomaly.reason_codes.length)} hint={detail.anomaly.reason_codes.slice(0, 2).join(", ") || "无"} />
+              <Metric icon={Sparkles} label="AI 状态" value={formatAIStatus(detail.anomaly.ai_status)} hint={isEmptyRecord(detail.ai_judgement) ? "暂无研判记录" : "已有研判结果"} />
             </div>
             <JsonBlock value={detail.anomaly.risk_components} />
           </section>
 
           <section className="detail-section">
             <div className="detail-section-title">
-              <h3>Rule Hits</h3>
-              <span>{detail.evidence_chain.rule_hits.length} rules</span>
+              <h3>命中规则</h3>
+              <span>{detail.evidence_chain.rule_hits.length} 条规则</span>
             </div>
             <div className="tag-list">
               {detail.evidence_chain.rule_hits.length > 0 ? (
                 detail.evidence_chain.rule_hits.map((rule) => <span key={rule}>{rule}</span>)
               ) : (
-                <span className="muted">none</span>
+                <span className="muted">无</span>
               )}
             </div>
             <div className="tag-list">
               {detail.evidence_chain.reason_codes.length > 0 ? (
                 detail.evidence_chain.reason_codes.map((code) => <span key={code}>{code}</span>)
               ) : (
-                <span className="muted">no reason codes</span>
+                <span className="muted">无原因码</span>
               )}
             </div>
           </section>
 
           <section className="detail-section">
             <div className="detail-section-title">
-              <h3>Evidence Chain</h3>
-              <span>{detail.anomaly.baseline_deviations.length} baseline deviations</span>
+              <h3>证据链</h3>
+              <span>{detail.anomaly.baseline_deviations.length} 个基线偏离</span>
             </div>
-            <p className="risk-reason">{detail.evidence_chain.risk_reason || "No risk reason returned."}</p>
+            <p className="risk-reason">{detail.evidence_chain.risk_reason || "未返回风险原因。"}</p>
             {detail.anomaly.baseline_deviations.length > 0 ? (
               <ul className="evidence-list">
                 {detail.anomaly.baseline_deviations.map((deviation) => {
-                  const feature = String(deviation.feature ?? deviation.name ?? "unknown");
-                  const actual = String(deviation.actual ?? deviation.value ?? "—");
+                  const feature = String(deviation.feature ?? deviation.name ?? "未知");
+                  const actual = String(deviation.actual ?? deviation.value ?? "-");
                   const source = String(deviation.evidence_source ?? "");
                   const sourceLabel = formatEvidenceSource(source);
                   const sampleDays = deviation.sample_days != null ? Number(deviation.sample_days) : undefined;
@@ -1117,22 +1117,22 @@ function AlertDetailPanel({
                       <strong>{feature}</strong>: {actual}
                       <span className="evidence-meta">
                         <span className="evidence-source">{sourceLabel}</span>
-                        {sampleDays !== undefined ? <span className="evidence-days">{sampleDays} days</span> : null}
+                        {sampleDays !== undefined ? <span className="evidence-days">{sampleDays} 天</span> : null}
                       </span>
                     </li>
                   );
                 })}
               </ul>
             ) : (
-              <p className="muted">No baseline deviations returned.</p>
+              <p className="muted">未返回基线偏离。</p>
             )}
             <JsonBlock value={detail.anomaly.evidence} />
           </section>
 
           <section className="detail-section">
             <div className="detail-section-title">
-              <h3>Related Logs</h3>
-              <span>{detail.related_logs.length} events</span>
+              <h3>相关日志</h3>
+              <span>{detail.related_logs.length} 条事件</span>
             </div>
             <div className="related-log-list">
               {detail.related_logs.map((log) => (
@@ -1145,25 +1145,25 @@ function AlertDetailPanel({
                   <small>{log.event_id}</small>
                 </article>
               ))}
-              {detail.related_logs.length === 0 ? <p className="muted">No related logs returned.</p> : null}
+              {detail.related_logs.length === 0 ? <p className="muted">未返回相关日志。</p> : null}
             </div>
           </section>
 
           <section className="detail-section">
             <div className="detail-section-title">
-              <h3>Baseline</h3>
-              <span>{isEmptyRecord(detail.baseline) ? "missing" : "available"}</span>
+              <h3>基线</h3>
+              <span>{isEmptyRecord(detail.baseline) ? "缺失" : "可用"}</span>
             </div>
-            {isEmptyRecord(detail.baseline) ? <p className="muted">No baseline returned for this anomaly.</p> : <JsonBlock value={detail.baseline} />}
+            {isEmptyRecord(detail.baseline) ? <p className="muted">该异常未返回基线。</p> : <JsonBlock value={detail.baseline} />}
           </section>
 
           <section className="detail-section">
             <div className="detail-section-title">
-              <h3>AI Judgement</h3>
-              <span>{isEmptyRecord(detail.ai_judgement) ? "not generated" : "stored"}</span>
+              <h3>AI 研判</h3>
+              <span>{isEmptyRecord(detail.ai_judgement) ? "未生成" : "已保存"}</span>
             </div>
             {isEmptyRecord(detail.ai_judgement) ? (
-              <p className="muted">No AI judgement returned for this anomaly.</p>
+              <p className="muted">该异常未返回 AI 研判。</p>
             ) : (
               <JsonBlock value={detail.ai_judgement} />
             )}
@@ -1204,13 +1204,13 @@ function UserProfilesPage() {
   return (
     <section className="page">
       <PageHeader
-        kicker="REQ-003 / REQ-006"
-        title="User Profiles"
-        description="Behavior baseline profiles from ClickHouse-backed user baseline APIs."
+        kicker="行为基线"
+        title="用户画像"
+        description="展示来自 ClickHouse 用户基线 API 的行为基线画像。"
         action={
           <button className="icon-button primary" type="button" onClick={() => load()} disabled={state.loading}>
             <RefreshCcw aria-hidden="true" className={state.loading ? "spin" : ""} />
-            Refresh
+            刷新
           </button>
         }
       />
@@ -1223,19 +1223,19 @@ function UserProfilesPage() {
                 <span className="eyebrow">{profile.tenant_id}</span>
                 <h2>{profile.user_id}</h2>
               </div>
-              <StatusPill ok={profile.baseline_confidence >= 0.7} label={`confidence ${profile.baseline_confidence}`} />
+              <StatusPill ok={profile.baseline_confidence >= 0.7} label={`置信度 ${profile.baseline_confidence}`} />
             </div>
             <div className="profile-meta">
               <span>{profile.baseline_date}</span>
-              <span>{profile.sample_days} days</span>
-              <span>{profile.sample_count} samples</span>
-              <span>{profile.fallback_level ?? "none"}</span>
+              <span>{profile.sample_days} 天</span>
+              <span>{profile.sample_count} 个样本</span>
+              <span>{formatFallbackLevel(profile.fallback_level)}</span>
               <span>模型 {profile.model_version}</span>
               <span>训练窗口 {profile.trained_from} ~ {profile.trained_to}</span>
             </div>
             <FiveW1HSections profile={profile} />
             <details className="profile-raw">
-              <summary>Raw profiles (debug)</summary>
+              <summary>原始画像（调试）</summary>
               <div className="profile-sections">
                 <ProfileSection title="who_profile" value={profile.who_profile} />
                 <ProfileSection title="time_profile" value={profile.time_profile} />
@@ -1248,7 +1248,7 @@ function UserProfilesPage() {
             </details>
           </article>
         ))}
-        {!state.loading && state.data?.items.length === 0 ? <EmptyState title="No user profiles" detail="No baseline records are available yet." /> : null}
+        {!state.loading && state.data?.items.length === 0 ? <EmptyState title="暂无用户画像" detail="当前还没有可用的基线记录。" /> : null}
       </div>
       <PaginationControls
         limit={query.limit}
@@ -1298,14 +1298,14 @@ function FiveW1HSections({ profile }: { profile: UserBaseline }) {
   const whoItems = flattenProfileFeatures(profile.who_profile);
   const whoWithMeta: ProfileFeature[] = [
     { name: "user_id", display: profile.user_id },
-    { name: "user_role", display: String(profile.who_profile?.user_role ?? profile.user_id ?? "unknown") },
+    { name: "user_role", display: String(profile.who_profile?.user_role ?? profile.user_id ?? "未知") },
     ...whoItems
   ];
 
   const whyItems = flattenProfileFeatures(profile.why_profile);
   const whyWithMeta: ProfileFeature[] = [
     { name: "baseline_confidence", display: `${Math.round(profile.baseline_confidence * 100)}%` },
-    { name: "fallback_level", display: profile.fallback_level ?? "none" },
+    { name: "fallback_level", display: formatFallbackLevel(profile.fallback_level) },
     ...whyItems
   ];
 
@@ -1319,18 +1319,18 @@ function FiveW1HSections({ profile }: { profile: UserBaseline }) {
   };
 
   const dimensions: Array<{ key: string; title: string; subtitle: string; icon: typeof Activity; items: ProfileFeature[] }> = [
-    { key: "who", title: "Who", subtitle: "User, role, department, account type", icon: UserRound, items: whoWithMeta },
-    { key: "when", title: "When", subtitle: "Active hours and weekdays", icon: Clock3, items: flattenProfileFeatures(profile.time_profile) },
-    { key: "where", title: "Where", subtitle: "Common IPs and locations", icon: RadioTower, items: flattenProfileFeatures(profile.location_profile) },
+    { key: "who", title: "Who", subtitle: "用户、角色、部门、账号类型", icon: UserRound, items: whoWithMeta },
+    { key: "when", title: "When", subtitle: "活跃时段与星期分布", icon: Clock3, items: flattenProfileFeatures(profile.time_profile) },
+    { key: "where", title: "Where", subtitle: "常见 IP 与地理位置", icon: RadioTower, items: flattenProfileFeatures(profile.location_profile) },
     {
       key: "what",
       title: "What",
-      subtitle: "Resources, actions, volume and outcomes",
+      subtitle: "资源、动作、体量与结果",
       icon: ListFilter,
       items: [...whatFromAccess, ...flattenProfileFeatures(profile.volume_profile), ...flattenProfileFeatures(profile.result_profile)]
     },
-    { key: "why", title: "Why", subtitle: "Business context and resource purpose", icon: Sparkles, items: whyWithMeta },
-    { key: "how", title: "How", subtitle: "Device, user-agent and auth method", icon: Server, items: howFromAccess }
+    { key: "why", title: "Why", subtitle: "业务上下文与资源用途", icon: Sparkles, items: whyWithMeta },
+    { key: "how", title: "How", subtitle: "设备、User-Agent 与认证方式", icon: Server, items: howFromAccess }
   ];
 
   return (
@@ -1387,7 +1387,7 @@ function displayFeatureValue(value: unknown): string {
       return (record.common_values as unknown[]).map((item) => String(item)).join(", ");
     }
     if (typeof record.mean_value === "number") {
-      const parts = [`avg ${roundNumber(record.mean_value)}`];
+      const parts = [`平均 ${roundNumber(record.mean_value)}`];
       if (typeof record.p95_value === "number") {
         parts.push(`p95 ${roundNumber(record.p95_value)}`);
       }
@@ -1438,13 +1438,13 @@ function AIJudgementPage() {
   return (
     <section className="page">
       <PageHeader
-        kicker="REQ-004 / REQ-006"
-        title="AI Judgement"
-        description="Stored AI anomaly judgements and explicit mock markers."
+        kicker="AI 研判"
+        title="AI 研判"
+        description="展示已保存的 AI 异常研判记录，并明确标记模拟结果。"
         action={
           <button className="icon-button primary" type="button" onClick={() => load()} disabled={state.loading}>
             <RefreshCcw aria-hidden="true" className={state.loading ? "spin" : ""} />
-            Refresh
+            刷新
           </button>
         }
       />
@@ -1455,20 +1455,20 @@ function AIJudgementPage() {
             <div className="profile-card-head">
               <div>
                 <span className="eyebrow">{item.event_id}</span>
-                <h2>{item.attack_type || "unknown attack"}</h2>
+                <h2>{item.attack_type || "未知攻击"}</h2>
               </div>
-              <span className={`risk-chip ${riskTone(item.risk_level)}`}>{item.risk_level}</span>
+              <span className={`risk-chip ${riskTone(item.risk_level)}`}>{formatRiskLevel(item.risk_level)}</span>
             </div>
             <p>{item.judgement}</p>
             <div className="tag-list">
               <span>{item.model_name}</span>
-              {item.is_mock && <span className="mock-badge" aria-label="Mock result">⚠ MOCK</span>}
-              <span>confidence {item.confidence}</span>
+              {item.is_mock && <span className="mock-badge" aria-label="模拟结果">模拟结果</span>}
+              <span>置信度 {item.confidence}</span>
             </div>
             <JsonBlock value={{ key_reasons: item.key_reasons, recommended_actions: item.recommended_actions, feedback_suggestions: item.feedback_suggestions }} />
           </article>
         ))}
-        {!state.loading && state.data?.items.length === 0 ? <EmptyState title="No AI judgements" detail="AI judgement records will appear after anomaly analysis writes ai_judgements." /> : null}
+        {!state.loading && state.data?.items.length === 0 ? <EmptyState title="暂无 AI 研判" detail="异常分析写入 ai_judgements 后，研判记录会在这里展示。" /> : null}
       </div>
       <PaginationControls
         limit={query.limit}
@@ -1521,7 +1521,7 @@ function DailyReportsPage() {
     setCreateState({ loading: true, message: null, error: null });
     createDailyReport({ date })
       .then((report) => {
-        setCreateState({ loading: false, message: `Report ready for ${report.date}.`, error: null });
+        setCreateState({ loading: false, message: `${report.date} 的日报已生成。`, error: null });
         load();
       })
       .catch((error: unknown) => setCreateState({ loading: false, message: null, error: formatError(error) }));
@@ -1530,15 +1530,15 @@ function DailyReportsPage() {
   return (
     <section className="page">
       <PageHeader
-        kicker="REQ-005 / REQ-006"
-        title="Daily Reports"
-        description="Daily security posture reports generated from logs, anomalies, and AI judgements."
+        kicker="安全日报"
+        title="日报"
+        description="基于日志、异常事件和 AI 研判生成每日安全态势报告。"
         action={
           <div className="header-actions">
             <input className="date-input" type="date" value={date} onChange={(event) => setDate(event.target.value)} />
             <button className="icon-button primary" type="button" onClick={generate} disabled={createState.loading}>
               <FileText aria-hidden="true" />
-              Generate
+              生成
             </button>
           </div>
         }
@@ -1552,21 +1552,21 @@ function DailyReportsPage() {
             <div className="profile-card-head">
               <div>
                 <span className="eyebrow">{report.date}</span>
-                <h2>Score {report.overall_score}</h2>
+                <h2>评分 {report.overall_score}</h2>
               </div>
-              <StatusPill ok={report.high_risk_count === 0} label={`${report.high_risk_count} high risk`} />
+              <StatusPill ok={report.high_risk_count === 0} label={`${report.high_risk_count} 个高风险`} />
             </div>
             <div className="metrics-band compact-metrics">
-              <Metric icon={Database} label="Logs" value={formatNumber(report.log_count)} hint="security_logs" />
-              <Metric icon={AlertCircle} label="Anomalies" value={formatNumber(report.alert_count)} hint="anomaly_events" />
-              <Metric icon={UserRound} label="Risk users" value={String(report.high_risk_users.length)} hint={report.high_risk_users.slice(0, 2).join(", ") || "none"} />
+              <Metric icon={Database} label="日志" value={formatNumber(report.log_count)} hint="security_logs" />
+              <Metric icon={AlertCircle} label="异常事件" value={formatNumber(report.alert_count)} hint="anomaly_events" />
+              <Metric icon={UserRound} label="风险用户" value={String(report.high_risk_users.length)} hint={report.high_risk_users.slice(0, 2).join(", ") || "无"} />
             </div>
             <p>{report.ai_summary}</p>
             <p className="risk-reason">{report.recommendation}</p>
             <JsonBlock value={{ major_risks: report.major_risks, typical_alerts: report.typical_alerts }} />
           </article>
         ))}
-        {!state.loading && state.data?.items.length === 0 ? <EmptyState title="No daily reports" detail="Generate a report for the selected date after ClickHouse has source data." /> : null}
+        {!state.loading && state.data?.items.length === 0 ? <EmptyState title="暂无日报" detail="ClickHouse 中有源数据后，可以为所选日期生成日报。" /> : null}
       </div>
       <PaginationControls
         limit={query.limit}
@@ -1595,11 +1595,11 @@ function PaginationControls({
   return (
     <div className="pagination">
       <button className="icon-button" type="button" disabled={offset <= 0} onClick={onPrevious}>
-        Previous
+        上一页
       </button>
-      <span>Offset {offset.toLocaleString()}</span>
+      <span>偏移 {offset.toLocaleString()}</span>
       <button className="icon-button" type="button" disabled={offset + limit >= total} onClick={onNext}>
-        Next
+        下一页
       </button>
     </div>
   );
@@ -1649,7 +1649,7 @@ function ServiceCard({
       <div>
         <div className="service-title">
           <h2>{name}</h2>
-          <StatusPill ok={ok} label={loading ? "Checking" : ok ? "Healthy" : "Unavailable"} />
+          <StatusPill ok={ok} label={loading ? "检查中" : ok ? "健康" : "不可用"} />
         </div>
         <p>{description}</p>
       </div>
@@ -1723,16 +1723,16 @@ function formatError(error: unknown): string {
   }
   if (error instanceof Error) {
     if (error instanceof TypeError && error.message.toLowerCase().includes("fetch")) {
-      return "FastAPI request failed. Confirm the backend is running on 127.0.0.1:8000 and the Vite /api proxy is active.";
+      return "FastAPI 请求失败。请确认后端运行在 127.0.0.1:8000，且 Vite /api 代理已启用。";
     }
     return error.message;
   }
-  return "Request failed";
+  return "请求失败";
 }
 
 function formatDateTime(value?: string | null): string {
   if (!value) {
-    return "n/a";
+    return "无";
   }
 
   const date = new Date(value);
@@ -1760,6 +1760,71 @@ function todayInShanghai(): string {
 
 function formatSource(value: SourceType): string {
   return sourceTypes.find((source) => source.value === value)?.label ?? value;
+}
+
+function formatResult(value: string): string {
+  const labels: Record<string, string> = {
+    success: "成功",
+    fail: "失败",
+    failed: "失败",
+    denied: "拒绝",
+    error: "错误",
+    ok: "正常",
+    allow: "允许",
+    allowed: "允许",
+    blocked: "阻断"
+  };
+  return labels[value] ?? value;
+}
+
+function formatRiskLevel(value: RiskLevel): string {
+  const labels: Record<RiskLevel, string> = {
+    low: "低",
+    medium: "中",
+    high: "高",
+    critical: "严重"
+  };
+  return labels[value];
+}
+
+function formatAlertStatus(value: string): string {
+  const labels: Record<string, string> = {
+    new: "新建",
+    investigating: "调查中",
+    closed: "已关闭",
+    false_positive: "误报",
+    analyzed: "已分析"
+  };
+  return labels[value] ?? value;
+}
+
+function formatAIStatus(value: string): string {
+  const labels: Record<string, string> = {
+    not_required: "无需分析",
+    pending: "待分析",
+    analyzed: "已分析",
+    failed: "分析失败"
+  };
+  return labels[value] ?? value;
+}
+
+function formatReviewStatus(value: string): string {
+  const labels: Record<string, string> = {
+    pending: "待审核",
+    accepted: "已接受",
+    rejected: "已拒绝"
+  };
+  return labels[value] ?? value;
+}
+
+function formatFallbackLevel(value?: UserBaseline["fallback_level"]): string {
+  const labels: Record<NonNullable<UserBaseline["fallback_level"]>, string> = {
+    none: "无回退",
+    peer_group: "同组用户",
+    department: "部门",
+    global: "全局"
+  };
+  return value ? labels[value] : "无回退";
 }
 
 function statusTone(status: string): string {
@@ -1807,9 +1872,9 @@ function isEmptyRecord(value: Record<string, unknown>): boolean {
 
 function formatResultRange(offset: number, limit: number, total: number, itemCount: number): string {
   if (itemCount === 0 || total === 0) {
-    return "Showing 0-0";
+    return "显示 0-0";
   }
-  return `Showing ${offset + 1}-${Math.min(offset + limit, total)}`;
+  return `显示 ${offset + 1}-${Math.min(offset + limit, total)}`;
 }
 
 function toApiDateTime(value: string): string {
