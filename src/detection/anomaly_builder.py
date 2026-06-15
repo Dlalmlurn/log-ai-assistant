@@ -45,7 +45,13 @@ REASON_RISK_COMPONENTS: dict[str, dict[str, int]] = {
         "behavior_sensitivity": 30,
         "event_correlation": 15,
     },
+    "vpn_traffic_volume_spike": {"rule_strength": 45, "behavior_sensitivity": 20},
+    "permission_change": {"rule_strength": 45, "behavior_sensitivity": 25},
+    "lateral_movement_signal": {"rule_strength": 60, "event_correlation": 25},
+    "service_account_anomaly": {"rule_strength": 55, "baseline_deviation": 15},
     "system_error_pattern": {"rule_strength": 30},
+    "maintenance_window": {"feedback_adjustment": -20},
+    "allowlisted_context": {"feedback_adjustment": -30},
 }
 
 # baseline 偏离程度到分数的映射。后续接入用户行为基线时会用到。
@@ -68,6 +74,10 @@ REASON_ATTACK_TYPE_MAP = {
     "admin_resource_access": "privilege_abuse",
     "high_api_rate": "api_abuse",
     "download_volume_spike": "data_exfiltration",
+    "vpn_traffic_volume_spike": "data_exfiltration",
+    "permission_change": "privilege_abuse",
+    "lateral_movement_signal": "lateral_movement",
+    "service_account_anomaly": "service_account_anomaly",
     "system_error_pattern": "system_anomaly",
 }
 
@@ -78,6 +88,8 @@ ATTACK_TYPE_PRIORITY = (
     "brute_force",
     "account_takeover",
     "privilege_abuse",
+    "lateral_movement",
+    "service_account_anomaly",
     "api_abuse",
     "sensitive_access",
     "suspicious_login",
@@ -190,7 +202,10 @@ def _risk_components(
         # 未知 reason_code 给一个保守的规则强度分，避免事件完全没有风险解释。
         for key, score in REASON_RISK_COMPONENTS.get(reason_code, {"rule_strength": 20}).items():
             # 同一个维度取最大值，不把多个规则简单叠加到失真。
-            components[key] = max(components[key], score)
+            if key == "feedback_adjustment" and score < 0:
+                components[key] = min(components[key], score)
+            else:
+                components[key] = max(components[key], score)
 
     baseline_score = max(
         [_baseline_deviation_score(item) for item in baseline_deviations],
@@ -199,7 +214,10 @@ def _risk_components(
     components["baseline_deviation"] = max(components["baseline_deviation"], baseline_score)
     for key, score in risk_component_overrides.items():
         if key in components:
-            components[key] = max(components[key], score)
+            if key == "feedback_adjustment" and score < 0:
+                components[key] = min(components[key], score)
+            else:
+                components[key] = max(components[key], score)
     return components
 
 
