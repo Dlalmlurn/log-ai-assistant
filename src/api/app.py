@@ -9,17 +9,22 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.ai_engine import AIAnalyzer
 from src.config import settings
 from src.health import HealthResponse, get_health_status
+from src.operations import NotificationService, OperationsRunner
+from src.operations.runner import TASK_DEPENDENCIES
 from src.report.daily_report import generate_daily_report
 from src.schemas import (
     AIFeedback,
     AIFeedbackListResponse,
+    AcceptanceReport,
+    AcceptanceReportDetail,
+    AcceptanceReportListResponse,
     AIJudgement,
     AIJudgementListResponse,
     AnomalyDetailResponse,
@@ -41,6 +46,10 @@ from src.schemas import (
     LogAggregateResponse,
     NormalizedLog,
     NormalizedLogListResponse,
+    NotificationOutbox,
+    NotificationOutboxListResponse,
+    OperationsTaskRun,
+    OperationsTaskRunListResponse,
     RiskLevel,
     SourceType,
     StatsOverviewResponse,
@@ -108,6 +117,10 @@ def get_storage() -> ClickHouseStorage:
 
 def get_analyzer() -> AIAnalyzer:
     return AIAnalyzer()
+
+
+def get_operations_runner(storage: ClickHouseStorage = Depends(get_storage)) -> OperationsRunner:
+    return OperationsRunner(storage)
 
 
 @app.get(
@@ -495,29 +508,24 @@ def list_baselines(
 def rebuild_baselines(
     storage: ClickHouseStorage = Depends(get_storage),
 ) -> BaselineRebuildResponse:
-    """Backfill daily features for all dates with logs, then rebuild baselines from ALL data."""
+    """Request the governed baseline task; lightweight adapters retain unit-test compatibility."""
     try:
-        if hasattr(storage, "_select_scalar"):
-            today = datetime.now(timezone.utc).date()
-            first_log = storage._select_scalar(
-                "SELECT min(toDate(event_time)) FROM security_logs WHERE tenant_id = {t:String}",
-                parameters={"t": "default"},
-                default=today,
-            )
-            if first_log is None:
-                first_log = today
-
-            current_day = first_log if isinstance(first_log, Date) else Date.fromisoformat(str(first_log))
-            while current_day <= today:
-                aggregate_daily_features(
-                    storage,
-                    target_date=datetime.combine(current_day, datetime.min.time(), tzinfo=timezone.utc),
+        if hasattr(storage, "insert_task_run"):
+            run = OperationsRunner(storage).run_task("baseline_rebuild")
+            if run.status != "succeeded":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": run.error_code or "baseline_rebuild_blocked",
+                        "message": run.error_message or "Baseline rebuild did not pass operations gates",
+                        "details": {"run_id": run.run_id, "status": run.status},
+                    },
                 )
-                current_day += timedelta(days=1)
-
-            update_seen_sources(storage)
-
-        baselines = build_and_store_baselines(storage)
+            rebuilt_count = int(run.output_refs.get("row_count") or 0)
+        else:
+            rebuilt_count = len(build_and_store_baselines(storage))
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -528,7 +536,7 @@ def rebuild_baselines(
             },
         ) from exc
 
-    return BaselineRebuildResponse(rebuilt_count=len(baselines))
+    return BaselineRebuildResponse(rebuilt_count=rebuilt_count)
 
 
 @app.get(
@@ -980,6 +988,246 @@ def list_daily_reports(
     )
 
 
+@app.get(
+    "/api/v1/reports/daily/{report_date}/markdown",
+    responses={200: {"content": {"text/markdown": {}}}, **STANDARD_ERROR_RESPONSES},
+    tags=["daily-reports"],
+    summary="Download the canonical daily report Markdown",
+)
+def download_daily_report_markdown(
+    report_date: Date,
+    tenant_id: str = Query(default="default"),
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> Response:
+    try:
+        report = storage.get_daily_report(tenant_id=tenant_id, report_date=report_date)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "clickhouse_query_failed",
+                "message": "Failed to query daily report Markdown",
+                "details": {"table": "daily_security_reports", "report_date": report_date.isoformat()},
+            },
+        ) from exc
+    if not report:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "daily_report_not_found",
+                "message": "Daily report not found",
+                "details": {"tenant_id": tenant_id, "report_date": report_date.isoformat()},
+            },
+        )
+    filename = f"daily-security-report-{tenant_id}-{report_date.isoformat()}.md"
+    return Response(
+        content=str(report.get("markdown") or ""),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get(
+    "/api/v1/operations/tasks",
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["operations"],
+    summary="List operations task definitions and latest runs",
+)
+def list_operations_tasks(
+    tenant_id: str = Query(default="default"),
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for task_name, dependencies in TASK_DEPENDENCIES.items():
+        runs, _ = storage.list_task_runs(task_name=task_name, tenant_id=tenant_id, limit=1, offset=0)
+        items.append(
+            {
+                "task_name": task_name,
+                "dependencies": list(dependencies),
+                "latest_run": runs[0] if runs else None,
+            }
+        )
+    return {"items": items}
+
+
+@app.get(
+    "/api/v1/operations/runs",
+    response_model=OperationsTaskRunListResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["operations"],
+    summary="List operations task runs",
+)
+def list_operations_runs(
+    task_name: str | None = Query(default=None),
+    tenant_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    target_date: Date | None = Query(default=None),
+    limit: int = Query(default=50, ge=1),
+    offset: int = Query(default=0, ge=0),
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> OperationsTaskRunListResponse:
+    items, total = storage.list_task_runs(
+        task_name=task_name,
+        tenant_id=tenant_id,
+        status=status,
+        target_date=target_date,
+        limit=limit,
+        offset=offset,
+    )
+    return OperationsTaskRunListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@app.get(
+    "/api/v1/operations/runs/{run_id}",
+    response_model=OperationsTaskRun,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["operations"],
+    summary="Get one operations task run",
+)
+def get_operations_run(
+    run_id: str,
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> OperationsTaskRun:
+    item = storage.get_task_run(run_id)
+    if not item:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "task_run_not_found", "message": "Task run not found", "details": {"run_id": run_id}},
+        )
+    return OperationsTaskRun.model_validate(item)
+
+
+@app.post(
+    "/api/v1/operations/runs/{run_id}/retry",
+    response_model=OperationsTaskRun,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["operations"],
+    summary="Retry a failed or needs-review operations task",
+)
+def retry_operations_run(
+    run_id: str,
+    runner: OperationsRunner = Depends(get_operations_runner),
+) -> OperationsTaskRun:
+    try:
+        return runner.retry_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "task_run_not_found", "message": "Task run not found", "details": {"run_id": run_id}},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "task_run_not_retryable", "message": str(exc), "details": {"run_id": run_id}},
+        ) from exc
+
+
+@app.get(
+    "/api/v1/acceptance/reports",
+    response_model=AcceptanceReportListResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["acceptance"],
+    summary="List persisted acceptance reports",
+)
+def list_acceptance_reports(
+    tenant_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=30, ge=1),
+    offset: int = Query(default=0, ge=0),
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> AcceptanceReportListResponse:
+    items, total = storage.list_acceptance_reports(
+        tenant_id=tenant_id,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+    return AcceptanceReportListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@app.get(
+    "/api/v1/acceptance/reports/{report_id}",
+    response_model=AcceptanceReportDetail,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["acceptance"],
+    summary="Get acceptance report metrics and bound versions",
+)
+def get_acceptance_report(
+    report_id: str,
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> AcceptanceReportDetail:
+    report, metrics = storage.get_acceptance_report(report_id)
+    if not report:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "acceptance_report_not_found", "message": "Acceptance report not found", "details": {"report_id": report_id}},
+        )
+    return AcceptanceReportDetail(report=AcceptanceReport.model_validate(report), metrics=metrics)
+
+
+@app.get(
+    "/api/v1/notifications",
+    response_model=NotificationOutboxListResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["notifications"],
+    summary="List notification delivery state",
+)
+def list_notifications(
+    tenant_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1),
+    offset: int = Query(default=0, ge=0),
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> NotificationOutboxListResponse:
+    items, total = storage.list_notifications(
+        tenant_id=tenant_id,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+    return NotificationOutboxListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@app.get(
+    "/api/v1/notifications/{outbox_id}",
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["notifications"],
+    summary="Get notification state and delivery attempts",
+)
+def get_notification(
+    outbox_id: str,
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> dict[str, Any]:
+    item = storage.get_notification(outbox_id)
+    if not item:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "notification_not_found", "message": "Notification not found", "details": {"outbox_id": outbox_id}},
+        )
+    return {"notification": NotificationOutbox.model_validate(item), "attempts": storage.list_notification_attempts(outbox_id)}
+
+
+@app.post(
+    "/api/v1/notifications/{outbox_id}/retry",
+    response_model=NotificationOutbox,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["notifications"],
+    summary="Manually retry a notification",
+)
+def retry_notification(
+    outbox_id: str,
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> NotificationOutbox:
+    try:
+        item = NotificationService(storage).retry(outbox_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "notification_not_found", "message": "Notification not found", "details": {"outbox_id": outbox_id}},
+        ) from exc
+    return NotificationOutbox.model_validate(item)
+
+
 @app.post(
     "/api/v1/reports/daily",
     response_model=DailyReport,
@@ -995,20 +1243,41 @@ def create_daily_report(
 ) -> DailyReport:
     try:
         report_day = _resolve_daily_report_date(date)
-        lock = _daily_report_lock(tenant_id, report_day.isoformat())
-        with lock:
-            existing, _total = storage.list_daily_reports(
+        if hasattr(storage, "insert_task_run"):
+            run = OperationsRunner(storage).run_task(
+                "daily_report_generate",
                 tenant_id=tenant_id,
-                start_date=report_day,
-                end_date=report_day,
-                limit=1,
-                offset=0,
+                target_date=report_day,
             )
-            if existing:
-                return DailyReport(**existing[0])
-
-            report = generate_daily_report(storage, date_str=report_day.isoformat())
-            storage.insert_daily_report(report, tenant_id=tenant_id)
+            if run.status != "succeeded":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": run.error_code or "daily_report_blocked",
+                        "message": run.error_message or "Daily report did not pass operations gates",
+                        "details": {"run_id": run.run_id, "status": run.status},
+                    },
+                )
+            stored = storage.get_daily_report(tenant_id=tenant_id, report_date=report_day)
+            if not stored:
+                raise RuntimeError("daily report task succeeded without a persisted report")
+            report = DailyReport(**stored)
+        else:
+            lock = _daily_report_lock(tenant_id, report_day.isoformat())
+            with lock:
+                existing, _total = storage.list_daily_reports(
+                    tenant_id=tenant_id,
+                    start_date=report_day,
+                    end_date=report_day,
+                    limit=1,
+                    offset=0,
+                )
+                if existing:
+                    return DailyReport(**existing[0])
+                report = generate_daily_report(storage, date_str=report_day.isoformat())
+                storage.insert_daily_report(report, tenant_id=tenant_id)
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(
             status_code=400,

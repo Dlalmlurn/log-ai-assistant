@@ -81,6 +81,7 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
     volumes:
       - ./sql/clickhouse/02_adr010_migration.sql:/migration/02_adr010_migration.sql:ro
+      - ./sql/clickhouse/03_adr011_migration.sql:/migration/03_adr011_migration.sql:ro
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >
@@ -90,7 +91,14 @@ services:
         --user "$$CLICKHOUSE_USER"
         --password "$$CLICKHOUSE_PASSWORD"
         --multiquery
-        < /migration/02_adr010_migration.sql
+        < /migration/02_adr010_migration.sql &&
+        clickhouse-client
+        --host clickhouse
+        --database "$$CLICKHOUSE_DATABASE"
+        --user "$$CLICKHOUSE_USER"
+        --password "$$CLICKHOUSE_PASSWORD"
+        --multiquery
+        < /migration/03_adr011_migration.sql
 
   flink-jobmanager:
     build:
@@ -165,6 +173,8 @@ services:
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY_DOCKER:-}
       DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-qwen-plus}
       BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:5173}
+      NOTIFICATION_WEBHOOK_URL: ${NOTIFICATION_WEBHOOK_URL:-http://webhook-receiver:8080/alerts}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:5173}
     ports:
       - "${FASTAPI_HOST_PORT:-8000}:8000"
     volumes:
@@ -177,6 +187,8 @@ services:
         condition: service_completed_successfully
       flink-jobmanager:
         condition: service_healthy
+      webhook-receiver:
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=5)\""]
       interval: 15s
@@ -197,11 +209,15 @@ services:
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-log_ai}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      NOTIFICATION_WEBHOOK_URL: ${NOTIFICATION_WEBHOOK_URL:-http://webhook-receiver:8080/alerts}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:5173}
     volumes:
       - ./src:/app/src:ro
     depends_on:
       clickhouse-migrate:
         condition: service_completed_successfully
+      webhook-receiver:
+        condition: service_started
     command:
       [
         "python",
@@ -215,6 +231,64 @@ services:
         "--batch-size",
         "${ANOMALY_DETECTOR_BATCH_SIZE:-2000}",
       ]
+
+  operations-runner:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
+    container_name: log-ai-operations-runner
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse}
+      CLICKHOUSE_HTTP_PORT: ${CLICKHOUSE_HTTP_PORT:-8123}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-log_ai}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      LOG_GENERATOR_MANIFEST: ${LOG_GENERATOR_MANIFEST:-/var/log/app/manifest.jsonl}
+      OPERATIONS_LOCK_DIR: /var/lock/log-ai-operations
+      OPERATIONS_TIMEZONE: ${OPERATIONS_TIMEZONE:-UTC}
+      OPERATIONS_SCHEDULER_INTERVAL_SECONDS: ${OPERATIONS_SCHEDULER_INTERVAL_SECONDS:-60}
+      OPERATIONS_MAX_ATTEMPTS: ${OPERATIONS_MAX_ATTEMPTS:-3}
+      OPERATIONS_RETRY_BASE_SECONDS: ${OPERATIONS_RETRY_BASE_SECONDS:-2}
+      OPERATIONS_WATERMARK_GRACE_MINUTES: ${OPERATIONS_WATERMARK_GRACE_MINUTES:-30}
+      ACCEPTANCE_LOOKBACK_MINUTES: ${ACCEPTANCE_LOOKBACK_MINUTES:-2}
+      NOTIFICATION_WEBHOOK_URL: ${NOTIFICATION_WEBHOOK_URL:-http://webhook-receiver:8080/alerts}
+      NOTIFICATION_MAX_ATTEMPTS: ${NOTIFICATION_MAX_ATTEMPTS:-5}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:5173}
+      DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-qwen-plus}
+    volumes:
+      - ./src:/app/src:ro
+      - ./config:/app/config:ro
+      - ./log-generator/scenarios:/app/log-generator/scenarios:ro
+      - ./logs:/var/log/app:ro
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
+      - ./.git:/app/.git:ro
+      - operations_locks:/var/lock/log-ai-operations
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      clickhouse-migrate:
+        condition: service_completed_successfully
+      webhook-receiver:
+        condition: service_started
+    entrypoint: ["python", "-m", "src.operations"]
+    command: ["scheduler"]
+
+  webhook-receiver:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
+    container_name: log-ai-webhook-receiver
+    restart: unless-stopped
+    environment:
+      WEBHOOK_OUTPUT: /var/log/webhook/deliveries.jsonl
+      WEBHOOK_FAIL_FIRST_N: ${WEBHOOK_FAIL_FIRST_N:-1}
+    volumes:
+      - webhook_deliveries:/var/log/webhook
+    command: ["python", "scripts/webhook_receiver.py"]
 
   raw-to-parsed:
     # Fallback normalizer for local isolation only. The default formal path uses
@@ -358,6 +432,8 @@ services:
       - ./tests:/app/tests:ro
       - ./sql:/app/sql:ro
       - ./docker-compose.yml:/app/docker-compose.yml:ro
+      - ./config:/app/config:ro
+      - ./log-generator:/app/log-generator:ro
     command: ["pytest", "-q"]
 
   elasticsearch:
@@ -395,4 +471,6 @@ volumes:
   kafka_data:
   clickhouse_data:
   frontend_node_modules:
+  operations_locks:
+  webhook_deliveries:
   es_data:

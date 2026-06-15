@@ -13,6 +13,7 @@ import time
 from typing import Any, Protocol
 
 from src.detection.rules import DetectionContext, RuleEngine
+from src.operations.notifications import NotificationService
 from src.schemas import AnomalyEvent, NormalizedLog
 from src.ueba.deviation import (
     UserContext,
@@ -108,6 +109,12 @@ class AnomalyDetectorWorker:
         anomalies = _dedupe_anomalies(self._detect_logs(logs), self._seen_anomaly_ids)
         if anomalies:
             self.storage.insert_anomalies(anomalies)
+            try:
+                NotificationService(self.storage).enqueue_anomalies(anomalies)
+            except Exception:
+                # The anomaly event is the security fact. Notification intent is
+                # retried independently and must never roll back anomaly storage.
+                pass
 
         self._upsert_seen_sources(logs)
 

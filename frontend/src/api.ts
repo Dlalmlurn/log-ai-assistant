@@ -1,5 +1,7 @@
 import type {
   AIFeedback,
+  AcceptanceReport,
+  AcceptanceReportDetail,
   AIJudgement,
   AnomalyDetailResponse,
   AnomalyEvent,
@@ -17,6 +19,8 @@ import type {
   ListResponse,
   LogsQuery,
   NormalizedLog,
+  NotificationOutbox,
+  OperationsTaskRun,
   PaginationQuery,
   StatsOverview,
   UserRiskStats,
@@ -128,6 +132,49 @@ export async function fetchDailyReports(
   signal?: AbortSignal
 ): Promise<ListResponse<DailyReport>> {
   return apiFetch<ListResponse<DailyReport>>(withQuery("/api/v1/reports/daily", query), { signal });
+}
+
+export function dailyReportMarkdownUrl(reportDate: string, tenantId = "default"): string {
+  return `${API_BASE}${withQuery(`/api/v1/reports/daily/${encodeURIComponent(reportDate)}/markdown`, { tenant_id: tenantId })}`;
+}
+
+export async function fetchOperationsRuns(
+  query: PaginationQuery & Partial<{ task_name: string; tenant_id: string; status: string; target_date: string }>,
+  signal?: AbortSignal
+): Promise<ListResponse<OperationsTaskRun>> {
+  return apiFetch<ListResponse<OperationsTaskRun>>(withQuery("/api/v1/operations/runs", query), { signal });
+}
+
+export async function retryOperationsRun(runId: string, signal?: AbortSignal): Promise<OperationsTaskRun> {
+  return apiFetch<OperationsTaskRun>(`/api/v1/operations/runs/${encodeURIComponent(runId)}/retry`, {
+    method: "POST",
+    signal
+  });
+}
+
+export async function fetchAcceptanceReports(
+  query: PaginationQuery & Partial<{ tenant_id: string; status: string }>,
+  signal?: AbortSignal
+): Promise<ListResponse<AcceptanceReport>> {
+  return apiFetch<ListResponse<AcceptanceReport>>(withQuery("/api/v1/acceptance/reports", query), { signal });
+}
+
+export async function fetchAcceptanceReport(reportId: string, signal?: AbortSignal): Promise<AcceptanceReportDetail> {
+  return apiFetch<AcceptanceReportDetail>(`/api/v1/acceptance/reports/${encodeURIComponent(reportId)}`, { signal });
+}
+
+export async function fetchNotifications(
+  query: PaginationQuery & Partial<{ tenant_id: string; status: string }>,
+  signal?: AbortSignal
+): Promise<ListResponse<NotificationOutbox>> {
+  return apiFetch<ListResponse<NotificationOutbox>>(withQuery("/api/v1/notifications", query), { signal });
+}
+
+export async function retryNotification(outboxId: string, signal?: AbortSignal): Promise<NotificationOutbox> {
+  return apiFetch<NotificationOutbox>(`/api/v1/notifications/${encodeURIComponent(outboxId)}/retry`, {
+    method: "POST",
+    signal
+  });
 }
 
 export async function createDailyReport(

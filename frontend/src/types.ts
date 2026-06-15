@@ -9,6 +9,8 @@ export type BaselinePeriodType =
   | "month_phase"
   | "weekday_month_phase";
 export type BaselineMergeMode = "append" | "replace" | "adjust";
+export type TaskRunStatus = "queued" | "running" | "succeeded" | "failed" | "needs_review" | "cancelled";
+export type NotificationStatus = "pending" | "delivering" | "delivered" | "retry_wait" | "dead_letter";
 
 export type HealthResponse = {
   kafka: boolean;
@@ -275,6 +277,87 @@ export type DailyReport = {
   ai_summary: string;
   recommendation: string;
   markdown: string;
+  run_id: string;
+  input_watermark: Record<string, unknown>;
+  quality_status: string;
+};
+
+export type OperationsTaskRun = {
+  run_id: string;
+  task_name: string;
+  tenant_id: string;
+  target_date: string;
+  idempotency_key: string;
+  scheduled_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  status: TaskRunStatus;
+  attempt: number;
+  input_watermark: Record<string, unknown>;
+  output_refs: Record<string, unknown>;
+  code_version: string;
+  error_code: string;
+  error_message: string;
+  version: number;
+};
+
+export type AcceptanceReport = {
+  report_id: string;
+  tenant_id: string;
+  status: "passed" | "failed" | "needs_review";
+  git_commit: string;
+  compose_config_digest: string;
+  scenario_version: string;
+  policy_version: string;
+  baseline_model_version: string;
+  ai_model: string;
+  ai_is_mock: boolean;
+  threshold_version: string;
+  sample_from?: string | null;
+  sample_to?: string | null;
+  normal_scenario_count: number;
+  attack_scenario_count: number;
+  created_at: string;
+  run_id: string;
+  summary: Record<string, unknown>;
+};
+
+export type AcceptanceMetric = {
+  report_id: string;
+  metric_name: string;
+  scenario_type: string;
+  numerator: number;
+  denominator: number;
+  value: number;
+  threshold_operator: "<=" | ">=" | "<" | ">";
+  threshold_value: number;
+  passed: boolean;
+  unit: string;
+  details: Record<string, unknown>;
+  created_at: string;
+};
+
+export type AcceptanceReportDetail = {
+  report: AcceptanceReport;
+  metrics: AcceptanceMetric[];
+};
+
+export type NotificationOutbox = {
+  outbox_id: string;
+  idempotency_key: string;
+  event_id: string;
+  tenant_id: string;
+  channel: string;
+  destination: string;
+  payload: Record<string, unknown>;
+  status: NotificationStatus;
+  attempt_count: number;
+  next_attempt_at: string;
+  last_error: string;
+  created_at: string;
+  updated_at: string;
+  delivered_at?: string | null;
+  version: number;
 };
 
 export type ListResponse<T> = {

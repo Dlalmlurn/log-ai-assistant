@@ -30,6 +30,9 @@ import {
   createBaselineOverride,
   createDailyReport,
   createFeedback,
+  dailyReportMarkdownUrl,
+  fetchAcceptanceReport,
+  fetchAcceptanceReports,
   fetchAIReports,
   fetchAlertDetail,
   fetchAlerts,
@@ -39,14 +42,20 @@ import {
   fetchFeedback,
   fetchHealth,
   fetchLogs,
+  fetchNotifications,
+  fetchOperationsRuns,
   fetchStatsOverview,
   fetchUserRiskStats,
   rebuildBaselines,
+  retryNotification,
+  retryOperationsRun,
   reviewFeedback,
   revokeBaselineOverride
 } from "./api";
 import type {
   AIFeedback,
+  AcceptanceReport,
+  AcceptanceReportDetail,
   AIJudgement,
   AnomalyDetailResponse,
   AnomalyEvent,
@@ -58,6 +67,8 @@ import type {
   HealthResponse,
   LogsQuery,
   NormalizedLog,
+  NotificationOutbox,
+  OperationsTaskRun,
   StatsOverview,
   UserBaseline,
   UserRiskStats,
@@ -65,7 +76,7 @@ import type {
   SourceType
 } from "./types";
 
-type PageKey = "logs" | "anomalies" | "users" | "ai" | "reports" | "status";
+type PageKey = "logs" | "anomalies" | "users" | "ai" | "reports" | "operations" | "status";
 
 type LoadState<T> = {
   data: T | null;
@@ -152,6 +163,10 @@ function App() {
             <FileText aria-hidden="true" />
             日报
           </button>
+          <button className={page === "operations" ? "active" : ""} type="button" onClick={() => setPage("operations")}>
+            <Activity aria-hidden="true" />
+            运营验收
+          </button>
           <button className={page === "status" ? "active" : ""} type="button" onClick={() => setPage("status")}>
             <Activity aria-hidden="true" />
             系统状态
@@ -174,9 +189,185 @@ function App() {
         {page === "users" ? <UserProfilesPage /> : null}
         {page === "ai" ? <AIJudgementPage /> : null}
         {page === "reports" ? <DailyReportsPage /> : null}
+        {page === "operations" ? <OperationsPage /> : null}
         {page === "status" ? <SystemStatusPage /> : null}
       </main>
     </div>
+  );
+}
+
+function OperationsPage() {
+  const [runs, setRuns] = useState<LoadState<{ items: OperationsTaskRun[]; total: number }>>({
+    data: null,
+    loading: true,
+    error: null,
+    updatedAt: null
+  });
+  const [reports, setReports] = useState<LoadState<{ items: AcceptanceReport[]; total: number }>>({
+    data: null,
+    loading: true,
+    error: null,
+    updatedAt: null
+  });
+  const [notifications, setNotifications] = useState<LoadState<{ items: NotificationOutbox[]; total: number }>>({
+    data: null,
+    loading: true,
+    error: null,
+    updatedAt: null
+  });
+  const [selectedReport, setSelectedReport] = useState<LoadState<AcceptanceReportDetail>>({
+    data: null,
+    loading: false,
+    error: null,
+    updatedAt: null
+  });
+
+  const load = useCallback((signal?: AbortSignal) => {
+    setRuns((current) => ({ ...current, loading: true, error: null }));
+    setReports((current) => ({ ...current, loading: true, error: null }));
+    setNotifications((current) => ({ ...current, loading: true, error: null }));
+    fetchOperationsRuns({ limit: 50, offset: 0 }, signal)
+      .then((data) => setRuns({ data, loading: false, error: null, updatedAt: new Date() }))
+      .catch((error: unknown) => setRuns((current) => ({ ...current, loading: false, error: formatError(error) })));
+    fetchAcceptanceReports({ limit: 20, offset: 0 }, signal)
+      .then((data) => {
+        setReports({ data, loading: false, error: null, updatedAt: new Date() });
+        const first = data.items[0];
+        if (first) {
+          setSelectedReport((current) => ({ ...current, loading: true, error: null }));
+          fetchAcceptanceReport(first.report_id, signal)
+            .then((detail) => setSelectedReport({ data: detail, loading: false, error: null, updatedAt: new Date() }))
+            .catch((error: unknown) => setSelectedReport((current) => ({ ...current, loading: false, error: formatError(error) })));
+        }
+      })
+      .catch((error: unknown) => setReports((current) => ({ ...current, loading: false, error: formatError(error) })));
+    fetchNotifications({ limit: 50, offset: 0 }, signal)
+      .then((data) => setNotifications({ data, loading: false, error: null, updatedAt: new Date() }))
+      .catch((error: unknown) => setNotifications((current) => ({ ...current, loading: false, error: formatError(error) })));
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    load(controller.signal);
+    return () => controller.abort();
+  }, [load]);
+
+  const retryRun = (runId: string) => {
+    retryOperationsRun(runId).then(() => load()).catch((error: unknown) => setRuns((current) => ({ ...current, error: formatError(error) })));
+  };
+  const retryDelivery = (outboxId: string) => {
+    retryNotification(outboxId).then(() => load()).catch((error: unknown) => setNotifications((current) => ({ ...current, error: formatError(error) })));
+  };
+
+  return (
+    <section className="page">
+      <PageHeader
+        kicker="ADR-011"
+        title="运营控制面与量化验收"
+        description="查看周期任务 attempt、水位门禁、版本化验收指标和通知投递状态。"
+        action={
+          <button className="icon-button primary" type="button" onClick={() => load()}>
+            <RefreshCcw aria-hidden="true" />
+            刷新
+          </button>
+        }
+      />
+
+      {runs.error ? <ErrorBanner message={runs.error} /> : null}
+      {reports.error ? <ErrorBanner message={reports.error} /> : null}
+      {notifications.error ? <ErrorBanner message={notifications.error} /> : null}
+
+      <div className="metrics-band">
+        <Metric icon={Activity} label="任务运行" value={formatNumber(runs.data?.total)} hint="保留每次 attempt" />
+        <Metric icon={ShieldCheck} label="验收报告" value={formatNumber(reports.data?.total)} hint="后端持久化结论" />
+        <Metric icon={RadioTower} label="通知任务" value={formatNumber(notifications.data?.total)} hint="outbox 与 dead-letter" />
+      </div>
+
+      <div className="section-title">
+        <h2>最近任务运行</h2>
+        <span>水位、幂等键、attempt 与失败原因</span>
+      </div>
+      <div className="log-table-wrap">
+        <table className="log-table">
+          <thead><tr><th>任务</th><th>业务日期</th><th>状态</th><th>Attempt</th><th>完成时间</th><th>操作</th></tr></thead>
+          <tbody>
+            {runs.data?.items.map((run) => (
+              <tr key={run.run_id}>
+                <td><strong>{run.task_name}</strong><small>{run.error_message || run.run_id}</small></td>
+                <td>{run.target_date}</td>
+                <td><StatusPill ok={run.status === "succeeded"} label={run.status} /></td>
+                <td>{run.attempt}</td>
+                <td>{formatDateTime(run.finished_at)}</td>
+                <td>
+                  {run.status === "failed" || run.status === "needs_review" ? (
+                    <button className="text-button" type="button" onClick={() => retryRun(run.run_id)}>重试</button>
+                  ) : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="section-title">
+        <h2>最新验收指标</h2>
+        <span>误报、检出、追踪、检测延迟和通知延迟分别判定</span>
+      </div>
+      {selectedReport.data ? (
+        <>
+          <div className="status-summary">
+            <div>
+              <span className="eyebrow">{selectedReport.data.report.report_id}</span>
+              <strong>{selectedReport.data.report.status}</strong>
+              <p>commit {selectedReport.data.report.git_commit.slice(0, 12)} · 阈值 {selectedReport.data.report.threshold_version} · AI {selectedReport.data.report.ai_is_mock ? "mock" : "真实模型"}</p>
+            </div>
+            <StatusPill ok={selectedReport.data.report.status === "passed"} label={selectedReport.data.report.status} />
+          </div>
+          <div className="log-table-wrap">
+            <table className="log-table">
+              <thead><tr><th>指标</th><th>结果</th><th>阈值</th><th>样本</th><th>结论</th></tr></thead>
+              <tbody>
+                {selectedReport.data.metrics.map((metric) => (
+                  <tr key={`${metric.metric_name}-${metric.scenario_type}`}>
+                    <td>{metric.metric_name}</td>
+                    <td>{metric.value} {metric.unit}</td>
+                    <td>{metric.threshold_operator} {metric.threshold_value}</td>
+                    <td>{metric.numerator}/{metric.denominator}</td>
+                    <td><StatusPill ok={metric.passed} label={metric.passed ? "通过" : "未通过"} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : <EmptyState title="暂无验收报告" detail="运行 scenario_evaluate 后将在这里展示持久化指标。" />}
+
+      <div className="section-title">
+        <h2>通知投递</h2>
+        <span>webhook 幂等、指数退避与 dead-letter</span>
+      </div>
+      <div className="log-table-wrap">
+        <table className="log-table">
+          <thead><tr><th>事件</th><th>渠道</th><th>状态</th><th>Attempt</th><th>下次投递</th><th>操作</th></tr></thead>
+          <tbody>
+            {notifications.data?.items.map((item) => (
+              <tr key={item.outbox_id}>
+                <td><strong>{item.event_id}</strong><small>{item.last_error || item.outbox_id}</small></td>
+                <td>{item.channel}</td>
+                <td><StatusPill ok={item.status === "delivered"} label={item.status} /></td>
+                <td>{item.attempt_count}</td>
+                <td>{formatDateTime(item.next_attempt_at)}</td>
+                <td>
+                  {item.status === "dead_letter" || item.status === "retry_wait" ? (
+                    <button className="text-button" type="button" onClick={() => retryDelivery(item.outbox_id)}>人工重试</button>
+                  ) : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
@@ -1753,7 +1944,7 @@ function AIJudgementPage() {
 
 function DailyReportsPage() {
   const [query, setQuery] = useState({ limit: 20, offset: 0 });
-  const [date, setDate] = useState(todayInShanghai());
+  const [date, setDate] = useState(dateInShanghai(-1));
   const [state, setState] = useState<LoadState<{ items: DailyReport[]; total: number }>>({
     data: null,
     loading: true,
@@ -1833,6 +2024,9 @@ function DailyReportsPage() {
             </div>
             <p>{report.ai_summary}</p>
             <p className="risk-reason">{report.recommendation}</p>
+            <a className="text-button" href={dailyReportMarkdownUrl(report.date)} download>
+              下载 Markdown
+            </a>
             <JsonBlock value={{ major_risks: report.major_risks, typical_alerts: report.typical_alerts }} />
           </article>
         ))}
@@ -2022,15 +2216,20 @@ function localDateTimeValue(value: Date): string {
   return new Date(value.getTime() - offset).toISOString().slice(0, 16);
 }
 
-function todayInShanghai(): string {
+function dateInShanghai(dayOffset = 0): string {
+  const target = new Date(Date.now() + dayOffset * 86_400_000);
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
     year: "numeric",
     month: "2-digit",
     day: "2-digit"
-  }).formatToParts(new Date());
+  }).formatToParts(target);
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${values.year}-${values.month}-${values.day}`;
+}
+
+function todayInShanghai(): string {
+  return dateInShanghai();
 }
 
 function formatSource(value: SourceType): string {
