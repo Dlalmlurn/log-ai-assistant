@@ -5,7 +5,7 @@
 
 from datetime import datetime, timedelta
 
-from src.detection.rules import detect_batch
+from src.detection.rules import DetectionContext, RuleEngine, detect_batch
 from src.schemas import NormalizedLog
 
 
@@ -124,3 +124,134 @@ def test_off_hours_login_only_never_reaches_critical() -> None:
             f"非工作时间单纯登录不应达到 high，实际得分 {alert.risk_score}"
         )
         assert alert.risk_level != "critical"
+
+
+def test_maintenance_and_allowlist_mitigate_without_dropping_event() -> None:
+    """维护窗口/白名单命中时保留事件和 reason_code，但通过 feedback_adjustment 降权。"""
+    log = build_log(
+        1,
+        action="api_call",
+        result="success",
+        user_id="ordinary.user",
+        resource="/api/admin/users",
+        attrs={"maintenance_window": True, "allowlisted_context": True},
+    )
+    alerts = RuleEngine().evaluate_log(
+        log,
+        DetectionContext(maintenance_window=True, allowlisted_context=True),
+    )
+
+    admin_alert = next(alert for alert in alerts if "admin_resource_access" in alert.reason_codes)
+    assert "maintenance_window" in admin_alert.reason_codes
+    assert "allowlisted_context" in admin_alert.reason_codes
+    assert admin_alert.evidence["risk_mitigations"] == ["maintenance_window", "allowlisted_context"]
+    assert admin_alert.risk_components["feedback_adjustment"] == -30
+    assert admin_alert.risk_score < 70
+    assert admin_alert.status == "new"
+
+
+def test_direct_download_or_export_is_data_exfiltration_signal() -> None:
+    log = build_log(
+        1,
+        action="download",
+        result="success",
+        source_type="api",
+        log_type="api_access",
+        resource="/api/files/export",
+        risk_tags=["download_volume_spike"],
+    )
+
+    alerts = RuleEngine().evaluate_log(log)
+
+    export_alert = next(alert for alert in alerts if "download_volume_spike" in alert.reason_codes)
+    assert export_alert.attack_type == "data_exfiltration"
+    assert "sensitive_resource_access" in export_alert.reason_codes
+    assert export_alert.risk_level in {"high", "critical"}
+
+
+def test_lateral_movement_signal_triggers_after_multiple_hosts() -> None:
+    engine = RuleEngine()
+    base_time = datetime(2026, 4, 1, 10, 0, 0)
+    logs = [
+        build_log(
+            idx,
+            action="access",
+            result="success",
+            source_type="system",
+            log_type="host_access",
+            user_id="alice",
+            src_ip="10.0.0.9",
+            host=f"srv-{idx}",
+            resource="/ssh/session",
+            event_time=base_time + timedelta(minutes=idx),
+            ingest_time=base_time + timedelta(minutes=idx),
+        )
+        for idx in range(1, 4)
+    ]
+
+    alerts = []
+    for log in logs:
+        alerts.extend(engine.evaluate_log(log))
+
+    lateral = [alert for alert in alerts if "lateral_movement_signal" in alert.reason_codes]
+    assert lateral
+    assert lateral[-1].attack_type == "lateral_movement"
+    assert lateral[-1].evidence["count"] == 3
+    assert lateral[-1].risk_level == "high"
+
+
+def test_service_account_anomaly_rule_uses_registered_reason_code() -> None:
+    log = build_log(
+        1,
+        action="login",
+        result="success",
+        user_id="svc-backup",
+        account_type="service",
+        src_ip="203.0.113.9",
+        resource="vpn-gw-bj01",
+        event_time=datetime(2026, 4, 1, 2, 0, 0),
+        ingest_time=datetime(2026, 4, 1, 2, 0, 0),
+    )
+
+    alerts = RuleEngine().evaluate_log(log, DetectionContext(seen_source=False))
+
+    service_alert = next(alert for alert in alerts if "service_account_anomaly" in alert.reason_codes)
+    assert service_alert.attack_type == "service_account_anomaly"
+    assert service_alert.evidence["account_type"] == "service"
+    assert service_alert.risk_level in {"medium", "high"}
+
+
+def test_insufficient_history_deviation_does_not_overestimate_new_source_risk() -> None:
+    log = build_log(
+        1,
+        action="login",
+        result="success",
+        user_id="new.user",
+        src_ip="203.0.113.10",
+        resource="vpn-gw-bj01",
+    )
+    context = DetectionContext(
+        seen_source=False,
+        baseline_deviations=[
+            {
+                "feature": "baseline_history",
+                "profile_group": "why",
+                "expected": "sufficient_user_baseline",
+                "actual": "user new.user has no baseline",
+                "deviation_type": "insufficient_history",
+                "severity": "medium",
+                "confidence": 0,
+                "evidence_source": "global",
+                "sample_days": 0,
+            }
+        ],
+    )
+
+    alerts = RuleEngine().evaluate_log(log, context)
+
+    new_source = next(alert for alert in alerts if "new_source_ip" in alert.reason_codes)
+    assert "insufficient_history" in [
+        item["deviation_type"] for item in new_source.baseline_deviations
+    ]
+    assert new_source.risk_level == "medium"
+    assert new_source.ai_status == "not_required"

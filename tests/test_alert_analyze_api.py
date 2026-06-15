@@ -22,7 +22,12 @@ ALERT_DOC = {
     "rule_hits": ["新IP登录后短时间访问敏感资源"],
     "baseline_deviations": [],
     "reason_codes": ["new_source_then_sensitive_access"],
-    "evidence": {"user_id": "alice", "src_ip": "203.0.113.9", "resource": "/api/export"},
+    "evidence": {
+        "user_id": "alice",
+        "src_ip": "203.0.113.9",
+        "resource": "/api/export",
+        "window_stats": {"failed_login_count_5m": 4, "sensitive_access_count_10m": 1},
+    },
     "related_event_ids": ["evt-login", "evt-export"],
     "ai_status": "pending",
     "status": "new",
@@ -94,6 +99,8 @@ class FakeAnalyzeStorage:
         self.inserted: list[AIJudgement] = []
         self.updated: list[dict[str, object]] = []
         self.anomaly: dict[str, object] | None = dict(ALERT_DOC)
+        self.related_logs: list[dict[str, object]] = list(RELATED_LOGS)
+        self.quality_stats = {"security_logs_count": 2, "parse_error_count": 0}
 
     def get_anomaly(self, event_id: str):
         self.calls.append({"method": "get_anomaly", "event_id": event_id})
@@ -105,7 +112,11 @@ class FakeAnalyzeStorage:
 
     def list_logs_by_event_ids(self, event_ids):
         self.calls.append({"method": "list_logs_by_event_ids", "event_ids": list(event_ids)})
-        return RELATED_LOGS
+        return self.related_logs
+
+    def security_log_quality_stats(self, event_ids):
+        self.calls.append({"method": "security_log_quality_stats", "event_ids": list(event_ids)})
+        return self.quality_stats
 
     def insert_ai_judgement(self, report: AIJudgement) -> None:
         self.inserted.append(report)
@@ -171,7 +182,7 @@ def test_analyze_alert_requires_context_stores_report_and_updates_alert() -> Non
     assert analyzer_call["event"].event_id == "anom-1"
     assert analyzer_call["baseline"]["user_id"] == "alice"
     assert [item["event_id"] for item in analyzer_call["related_logs"]] == ["evt-login", "evt-export"]
-    assert analyzer_call["window_stats"] == {}
+    assert analyzer_call["window_stats"] == {"failed_login_count_5m": 4, "sensitive_access_count_10m": 1}
 
     assert storage.inserted[0].judgement_id == "ai-1"
     assert storage.updated == [{"event_id": "anom-1", "ai_status": "analyzed"}]
@@ -180,6 +191,33 @@ def test_analyze_alert_requires_context_stores_report_and_updates_alert() -> Non
         {"method": "get_user_baseline", "user_id": "alice", "tenant_id": "default"},
         {"method": "list_logs_by_event_ids", "event_ids": ["evt-login", "evt-export"]},
     ]
+
+
+def test_analyze_alert_derives_window_stats_from_related_logs_when_evidence_is_missing() -> None:
+    storage = FakeAnalyzeStorage()
+    storage.anomaly = {
+        **ALERT_DOC,
+        "evidence": {"user_id": "alice", "src_ip": "203.0.113.9", "resource": "/api/export"},
+    }
+    analyzer = FakeAnalyzer()
+
+    analyze_alert(event_id="anom-1", storage=storage, analyzer=analyzer)
+
+    analyzer_call = analyzer.calls[0]
+    assert analyzer_call["window_stats"] == {
+        "related_log_count": 2,
+        "failed_login_count": 0,
+        "successful_login_count": 1,
+        "denied_count": 0,
+        "sensitive_access_count": 1,
+        "unique_src_ip_count": 1,
+        "action_counts": {"login": 1, "api_call": 1},
+        "result_counts": {"success": 2},
+        "window_start": "2026-05-13T10:00:00+00:00",
+        "window_end": "2026-05-13T10:02:00+00:00",
+        "window_seconds": 120,
+    }
+    assert {"method": "security_log_quality_stats", "event_ids": ["evt-login", "evt-export"]} not in storage.calls
 
 
 def test_analyze_alert_returns_clear_404_when_alert_is_missing() -> None:

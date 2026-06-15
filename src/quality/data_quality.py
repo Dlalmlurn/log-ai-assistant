@@ -133,6 +133,130 @@ def write_data_quality_metrics(
     return metrics
 
 
+def build_reconciliation_report(metrics: list[DataQualityMetric]) -> list[dict[str, Any]]:
+    return [_reconcile_metric(metric) for metric in metrics]
+
+
+def verify_manifest_event_ids(
+    *,
+    storage: ClickHouseStorage,
+    manifest_path: Path,
+    sample_size: int = 20,
+) -> dict[str, Any]:
+    rows = load_manifest_rows(manifest_path)
+    event_ids = [str(row.get("event_id")) for row in rows if row.get("event_id")]
+    sampled_event_ids = event_ids[: max(0, sample_size)]
+    if not sampled_event_ids:
+        return {
+            "sampled_count": 0,
+            "found_count": 0,
+            "missing_count": 0,
+            "missing_event_ids": [],
+        }
+
+    logs = storage.list_logs_by_event_ids(sampled_event_ids)
+    found_event_ids = {
+        str(log.get("event_id"))
+        for log in logs
+        if isinstance(log, dict) and log.get("event_id")
+    }
+    missing_event_ids = [
+        event_id for event_id in sampled_event_ids if event_id not in found_event_ids
+    ]
+    return {
+        "sampled_count": len(sampled_event_ids),
+        "found_count": len(found_event_ids),
+        "missing_count": len(missing_event_ids),
+        "missing_event_ids": missing_event_ids,
+    }
+
+
+def _reconcile_metric(metric: DataQualityMetric) -> dict[str, Any]:
+    counts = {
+        "generated_count": metric.generated_count,
+        "raw_logs_count": metric.raw_logs_count,
+        "parsed_logs_count": metric.parsed_logs_count,
+        "clickhouse_insert_count": metric.clickhouse_insert_count,
+        "security_logs_count": metric.security_logs_count,
+    }
+    deltas = {
+        "generated_to_raw": metric.raw_logs_count - metric.generated_count,
+        "raw_to_parsed": metric.parsed_logs_count - metric.raw_logs_count,
+        "parsed_to_clickhouse_insert": metric.clickhouse_insert_count - metric.parsed_logs_count,
+        "clickhouse_insert_to_security": metric.security_logs_count - metric.clickhouse_insert_count,
+    }
+    explanations = _reconciliation_explanations(metric, deltas)
+    return {
+        "metric_date": metric.metric_date.isoformat(),
+        "tenant_id": metric.tenant_id,
+        "source_type": str(metric.source_type),
+        "counts": counts,
+        "deltas": deltas,
+        "explanations": explanations,
+        "status": "ok" if not explanations else "needs_review",
+    }
+
+
+def _reconciliation_explanations(
+    metric: DataQualityMetric,
+    deltas: dict[str, int],
+) -> list[str]:
+    explanations: list[str] = []
+
+    if deltas["generated_to_raw"] < 0:
+        explanations.append(
+            "raw_logs_count is below generated_count; inspect Filebeat/Kafka lag, raw file rotation, or manifest rows not yet collected."
+        )
+    elif deltas["generated_to_raw"] > 0:
+        explanations.append(
+            "raw_logs_count exceeds generated_count; likely log replay, duplicate collection, or an appended manifest window overlap."
+        )
+
+    if deltas["raw_to_parsed"] < 0:
+        explanations.append(
+            "parsed_logs_count is below raw_logs_count; parse errors, parser lag, or filtered malformed records can explain the gap."
+        )
+    elif deltas["raw_to_parsed"] > 0:
+        explanations.append(
+            "parsed_logs_count exceeds raw_logs_count; check replayed parsed topic messages or date/source filter mismatch."
+        )
+
+    if deltas["parsed_to_clickhouse_insert"] < 0:
+        explanations.append(
+            "clickhouse_insert_count is below parsed_logs_count; inspect sink lag, failed insert batches, or retry backoff."
+        )
+    elif deltas["parsed_to_clickhouse_insert"] > 0:
+        explanations.append(
+            "clickhouse_insert_count exceeds parsed_logs_count; duplicate sink retries or Kafka replay can produce extra raw inserts."
+        )
+
+    if deltas["clickhouse_insert_to_security"] < 0:
+        explanations.append(
+            "security_logs_count is below clickhouse_insert_count; ReplacingMergeTree deduplication or FINAL query collapse can explain the difference."
+        )
+    elif deltas["clickhouse_insert_to_security"] > 0:
+        explanations.append(
+            "security_logs_count exceeds clickhouse_insert_count; verify metric date/source filters and previous retained rows."
+        )
+
+    if metric.parse_error_rate > 0:
+        explanations.append(
+            f"parse_error_rate is {metric.parse_error_rate}; parser failures should be sampled before treating the gap as data loss."
+        )
+    missing_rates = {
+        "missing_event_time_rate": metric.missing_event_time_rate,
+        "missing_user_id_rate": metric.missing_user_id_rate,
+        "missing_src_ip_rate": metric.missing_src_ip_rate,
+        "missing_action_rate": metric.missing_action_rate,
+        "missing_result_rate": metric.missing_result_rate,
+    }
+    for name, value in missing_rates.items():
+        if value > 0:
+            explanations.append(f"{name} is {value}; check parser field mapping and source contract coverage.")
+
+    return explanations
+
+
 def _manifest_metric_date(items: list[dict[str, Any]]) -> date:
     for item in items:
         raw = item.get("timestamp")

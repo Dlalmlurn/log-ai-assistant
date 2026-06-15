@@ -18,11 +18,15 @@ from src.schemas import AnomalyEvent, NormalizedLog
 
 # 判断敏感资源时用的关键词。只要 resource 里包含这些词，就会进入敏感访问规则。
 SENSITIVE_KEYWORDS = ("export", "download", "admin", "/admin", "sensitive", "config", "backup")
+PERMISSION_KEYWORDS = ("permission", "grant", "revoke", "role", "privilege")
+DOWNLOAD_KEYWORDS = ("export", "download", "dump", "backup")
+SERVICE_ACCOUNT_PREFIXES = ("svc", "svc_", "svc-", "service", "service_")
 
 # 滑动窗口长度：规则会统计最近 1/5/10 分钟内发生了多少次相关行为。
 WINDOW_1M = timedelta(minutes=1)
 WINDOW_5M = timedelta(minutes=5)
 WINDOW_10M = timedelta(minutes=10)
+LATERAL_MOVEMENT_HOST_THRESHOLD = 3
 
 
 @dataclass
@@ -31,6 +35,8 @@ class DetectionContext:
 
     seen_source: bool | None = None
     baseline_deviations: list[dict[str, Any]] = field(default_factory=list)
+    maintenance_window: bool = False
+    allowlisted_context: bool = False
 
 
 def _is_sensitive(resource: str | None) -> bool:
@@ -55,6 +61,7 @@ class RuleEngine:
         self.ip_failed_users: dict[str, Deque[tuple[datetime, str]]] = defaultdict(deque)
         self.user_api_calls: dict[str, Deque[datetime]] = defaultdict(deque)
         self.user_sensitive_access: dict[str, Deque[datetime]] = defaultdict(deque)
+        self.user_host_access: dict[str, Deque[tuple[datetime, str]]] = defaultdict(deque)
         self.known_login_ips: dict[str, set[str]] = defaultdict(set)
         self.new_ip_login_events: dict[str, Deque[tuple[datetime, str, str]]] = defaultdict(deque)
 
@@ -75,6 +82,40 @@ class RuleEngine:
         if log.action == "api_call":
             anomalies.extend(self._handle_api_call(log, ts, context))
 
+        if _is_download_or_export(log):
+            anomalies.extend(self._handle_download_or_export(log, context))
+
+        if _is_permission_change(log):
+            anomalies.append(
+                self._build_anomaly(
+                    log,
+                    rule="权限变更行为",
+                    reason_codes=["permission_change"],
+                    evidence={"user_id": log.user_id, "action": log.action, "resource": log.resource},
+                    baseline_deviations=context.baseline_deviations,
+                    context=context,
+                )
+            )
+
+        if _is_service_account(log) and _is_service_account_anomalous(log, context):
+            anomalies.append(
+                self._build_anomaly(
+                    log,
+                    rule="服务账号异常行为",
+                    reason_codes=["service_account_anomaly"],
+                    evidence={
+                        "user_id": log.user_id,
+                        "account_type": log.account_type,
+                        "src_ip": log.src_ip,
+                        "event_hour": ts.hour,
+                    },
+                    baseline_deviations=context.baseline_deviations,
+                    context=context,
+                )
+            )
+
+        anomalies.extend(self._handle_lateral_movement(log, ts, context))
+
         if _is_sensitive(log.resource):
             anomalies.extend(self._handle_sensitive_access(log, ts, context))
 
@@ -87,6 +128,7 @@ class RuleEngine:
                     reason_codes=["admin_resource_access"],
                     evidence={"resource": log.resource, "user_id": log.user_id},
                     baseline_deviations=context.baseline_deviations,
+                    context=context,
                 )
             )
 
@@ -101,6 +143,7 @@ class RuleEngine:
                         reason_codes=["system_error_pattern"],
                         evidence={"message": log.message, "result": log.result},
                         baseline_deviations=context.baseline_deviations,
+                        context=context,
                     )
                 )
 
@@ -129,6 +172,7 @@ class RuleEngine:
                         evidence={"src_ip": log.src_ip, "failed_count_5m": len(q)},
                         risk_component_overrides={"rule_strength": 70},
                         baseline_deviations=context.baseline_deviations,
+                        context=context,
                     )
                 )
 
@@ -144,6 +188,7 @@ class RuleEngine:
                         reason_codes=["failed_login_spike"],
                         evidence={"user_id": log.user_id, "failed_count_5m": len(uq)},
                         baseline_deviations=context.baseline_deviations,
+                        context=context,
                     )
                 )
 
@@ -164,6 +209,7 @@ class RuleEngine:
                             "count": len(unique_users),
                         },
                         baseline_deviations=context.baseline_deviations,
+                        context=context,
                     )
                 )
 
@@ -192,6 +238,7 @@ class RuleEngine:
                         reason_codes=["new_source_ip"],
                         evidence={"user_id": log.user_id, "new_ip": log.src_ip},
                         baseline_deviations=context.baseline_deviations if context else None,
+                        context=context,
                     )
                 )
             else:
@@ -205,6 +252,7 @@ class RuleEngine:
                     reason_codes=["rare_login_hour"],
                     evidence={"event_hour": ts.hour, "work_hours": f"{settings.work_hour_start}:00-{settings.work_hour_end}:00"},
                     baseline_deviations=context.baseline_deviations if context else None,
+                    context=context,
                 )
             )
         return anomalies
@@ -232,6 +280,7 @@ class RuleEngine:
                     reason_codes=["high_api_rate"],
                     evidence={"user_id": log.user_id, "api_calls_1m": len(q)},
                     baseline_deviations=context.baseline_deviations,
+                    context=context,
                 )
             )
         return anomalies
@@ -259,6 +308,7 @@ class RuleEngine:
                     reason_codes=["sensitive_resource_access"],
                     evidence={"user_id": log.user_id, "sensitive_count_5m": len(q), "resource": log.resource},
                     baseline_deviations=context.baseline_deviations,
+                    context=context,
                 )
             )
 
@@ -276,6 +326,7 @@ class RuleEngine:
                         evidence={"user_id": log.user_id, "src_ip": log.src_ip, "resource": log.resource},
                         related_event_ids=[item[2] for item in recent],
                         baseline_deviations=context.baseline_deviations,
+                        context=context,
                     )
                 )
                 # 如果敏感资源还是导出/下载接口，风险更像数据外泄。
@@ -288,10 +339,62 @@ class RuleEngine:
                             evidence={"user_id": log.user_id, "resource": log.resource, "src_ip": log.src_ip},
                             related_event_ids=[item[2] for item in recent],
                             baseline_deviations=context.baseline_deviations,
+                            context=context,
                         )
                     )
 
         return anomalies
+
+    def _handle_download_or_export(
+        self,
+        log: NormalizedLog,
+        context: DetectionContext,
+    ) -> list[AnomalyEvent]:
+        if not log.user_id:
+            return []
+        reason_codes = ["download_volume_spike"]
+        if _is_sensitive(log.resource):
+            reason_codes.append("sensitive_resource_access")
+        return [
+            self._build_anomaly(
+                log,
+                rule="下载或导出行为异常",
+                reason_codes=reason_codes,
+                evidence={"user_id": log.user_id, "resource": log.resource, "action": log.action},
+                baseline_deviations=context.baseline_deviations,
+                context=context,
+            )
+        ]
+
+    def _handle_lateral_movement(
+        self,
+        log: NormalizedLog,
+        ts: datetime,
+        context: DetectionContext,
+    ) -> list[AnomalyEvent]:
+        if not log.user_id:
+            return []
+        host_key = _host_key(log)
+        if not host_key:
+            return []
+
+        q = self.user_host_access[log.user_id]
+        q.append((ts, host_key))
+        self._trim_pairs(q, ts - WINDOW_10M)
+        unique_hosts = sorted({host for _, host in q})
+        if len(unique_hosts) < LATERAL_MOVEMENT_HOST_THRESHOLD and "lateral_movement_signal" not in log.risk_tags:
+            return []
+
+        return [
+            self._build_anomaly(
+                log,
+                rule="短时间访问多个主机",
+                reason_codes=["lateral_movement_signal"],
+                evidence={"user_id": log.user_id, "hosts_10m": unique_hosts, "count": len(unique_hosts)},
+                baseline_deviations=context.baseline_deviations,
+                context=context,
+            )
+        ]
 
     @staticmethod
     def _trim_times(items: Deque[datetime], min_time: datetime) -> None:
@@ -323,17 +426,23 @@ class RuleEngine:
         related_event_ids: list[str] | None = None,
         risk_component_overrides: dict[str, int] | None = None,
         baseline_deviations: list[dict[str, Any]] | None = None,
+        context: DetectionContext | None = None,
     ) -> AnomalyEvent:
         """把规则命中信息交给 builder，生成标准异常事件。"""
 
         seed = _event_id_seed(log, rule, reason_codes)
+        resolved_reason_codes = [*reason_codes, *_mitigation_reason_codes(log, context)]
+        resolved_evidence = dict(evidence)
+        mitigations = _mitigation_reason_codes(log, context)
+        if mitigations:
+            resolved_evidence["risk_mitigations"] = mitigations
         return self.builder.build(
             log=log,
             rule_hits=[rule],
-            reason_codes=reason_codes,
-            evidence=evidence,
+            reason_codes=resolved_reason_codes,
+            evidence=resolved_evidence,
             related_event_ids=related_event_ids,
-            risk_component_overrides=risk_component_overrides,
+            risk_component_overrides=risk_component_overrides or {},
             baseline_deviations=baseline_deviations,
             event_id_seed=seed,
         )
@@ -360,3 +469,67 @@ def _event_id_seed(log: NormalizedLog, rule: str, reason_codes: list[str]) -> st
             rule,
         ]
     )
+
+
+def _is_download_or_export(log: NormalizedLog) -> bool:
+    if "download_volume_spike" in log.risk_tags:
+        return True
+    haystack = (log.action or "").lower()
+    return any(keyword in haystack for keyword in DOWNLOAD_KEYWORDS)
+
+
+def _is_permission_change(log: NormalizedLog) -> bool:
+    haystack = " ".join([log.action or "", log.resource or "", log.message or ""]).lower()
+    return any(keyword in haystack for keyword in PERMISSION_KEYWORDS)
+
+
+def _is_service_account(log: NormalizedLog) -> bool:
+    account_type = (log.account_type or "").lower()
+    user_id = (log.user_id or "").lower()
+    return account_type == "service" or user_id.startswith(SERVICE_ACCOUNT_PREFIXES)
+
+
+def _is_service_account_anomalous(log: NormalizedLog, context: DetectionContext) -> bool:
+    if "service_account_anomaly" in log.risk_tags:
+        return True
+    if context.seen_source is False:
+        return True
+    if _is_sensitive(log.resource):
+        return True
+    return log.event_time.hour < settings.work_hour_start or log.event_time.hour >= settings.work_hour_end
+
+
+def _host_key(log: NormalizedLog) -> str | None:
+    for value in (log.host, log.dst_ip, log.object_id):
+        if value:
+            return str(value)
+    return None
+
+
+def _mitigation_reason_codes(log: NormalizedLog, context: DetectionContext | None) -> list[str]:
+    attrs = log.attrs if isinstance(log.attrs, dict) else {}
+    reason_codes: list[str] = []
+    if (
+        (context and context.maintenance_window)
+        or _truthy(attrs.get("maintenance_window"))
+        or _truthy(attrs.get("maintenance_window_hit"))
+        or "maintenance_window" in log.risk_tags
+    ):
+        reason_codes.append("maintenance_window")
+    if (
+        (context and context.allowlisted_context)
+        or _truthy(attrs.get("allowlisted_context"))
+        or _truthy(attrs.get("allowlisted"))
+        or _truthy(attrs.get("whitelisted"))
+        or "allowlisted_context" in log.risk_tags
+    ):
+        reason_codes.append("allowlisted_context")
+    return list(dict.fromkeys(reason_codes))
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}

@@ -33,6 +33,7 @@ def _make_log(
     src_ip: str = "1.1.1.1",
     resource: str = "/home",
     hour: int = 10,
+    attrs: dict[str, Any] | None = None,
 ) -> Any:
     """构造最小 log-like 对象（带必要属性）。"""
 
@@ -41,6 +42,8 @@ def _make_log(
             self.src_ip = src_ip
             self.resource = resource
             self.event_time = BASE_TIME.replace(hour=hour)
+            self.user_id = "alice"
+            self.attrs = attrs or {}
 
     return _FakeLog()
 
@@ -48,12 +51,14 @@ def _make_log(
 def _make_context(
     baseline: dict[str, Any] | None = None,
     seen_sources: set[str] | None = None,
+    daily_feature: dict[str, Any] | None = None,
 ) -> UserContext:
     return UserContext(
         tenant_id="default",
         user_id="alice",
         baseline=baseline,
         seen_sources=seen_sources or set(),
+        daily_feature=daily_feature,
     )
 
 
@@ -63,6 +68,7 @@ _HIGH_CONFIDENCE_BASELINE = {
     "location_profile": {"common_ips": ["10.0.0.1"]},
     "time_profile": {"active_hours": ["09:00-18:00"]},
     "access_profile": {"common_resources": ["/home", "/api/v1"]},
+    "result_profile": {"failed_login_count": {"p95": 3, "p99": 5}},
 }
 
 _LOW_CONFIDENCE_BASELINE = {
@@ -71,6 +77,7 @@ _LOW_CONFIDENCE_BASELINE = {
     "location_profile": {"common_ips": ["10.0.0.1"]},
     "time_profile": {"active_hours": ["09:00-18:00"]},
     "access_profile": {"common_resources": ["/home"]},
+    "result_profile": {"failed_login_count": {"p95": 3, "p99": 5}},
 }
 
 
@@ -80,19 +87,24 @@ _LOW_CONFIDENCE_BASELINE = {
 
 
 def test_evaluate_deviations_returns_empty_when_no_baseline() -> None:
-    """无 baseline 时应返回空列表（离线降级行为）。"""
+    """无 baseline 时应返回样本不足降级证据，而不是误判为无偏离。"""
     ctx = _make_context(baseline=None)
     log = _make_log()
     result = evaluate_deviations(log, ctx)
-    assert result == []
+    assert len(result) == 1
+    assert result[0].deviation_type == "insufficient_history"
+    assert result[0].severity == "medium"
+    assert result[0].evidence_source == "global"
+    assert result[0].sample_days == 0
 
 
 def test_evaluate_deviations_returns_empty_for_anonymous_user() -> None:
-    """user_id=None 的上下文（匿名用户）也应返回空列表。"""
+    """user_id=None 且无 baseline 的上下文返回样本不足降级证据。"""
     ctx = UserContext(tenant_id="default", user_id=None)
     log = _make_log()
     result = evaluate_deviations(log, ctx)
-    assert result == []
+    assert len(result) == 1
+    assert result[0].deviation_type == "insufficient_history"
 
 
 # ============================================================================
@@ -126,6 +138,31 @@ def test_evaluate_deviations_known_src_ip_no_location_deviation() -> None:
     result = evaluate_deviations(log, ctx)
     features = [d.feature for d in result]
     assert "src_ip" not in features
+
+
+def test_evaluate_deviations_seen_source_suppresses_new_src_ip_deviation() -> None:
+    """持久化 seen_sources 已见过的来源不应再作为强新来源证据。"""
+    ctx = _make_context(baseline=_HIGH_CONFIDENCE_BASELINE, seen_sources={"9.9.9.9"})
+    log = _make_log(src_ip="9.9.9.9", hour=10)
+    result = evaluate_deviations(log, ctx)
+    assert "src_ip" not in [d.feature for d in result]
+
+
+def test_evaluate_deviations_seen_sources_can_prove_new_src_ip() -> None:
+    """无 common_ips 但有持久化 seen_sources 时，陌生来源证据来自 seen_sources。"""
+    baseline = {
+        **_HIGH_CONFIDENCE_BASELINE,
+        "location_profile": {},
+    }
+    ctx = _make_context(baseline=baseline, seen_sources={"10.0.0.1"})
+    log = _make_log(src_ip="9.9.9.9", hour=10)
+
+    result = evaluate_deviations(log, ctx)
+
+    src_ip = [d for d in result if d.feature == "src_ip"]
+    assert len(src_ip) == 1
+    assert src_ip[0].deviation_type == "new_source_ip"
+    assert src_ip[0].evidence_source == "seen_sources"
 
 
 # ============================================================================
@@ -186,6 +223,63 @@ def test_evaluate_deviations_known_resource_no_access_deviation() -> None:
     result = evaluate_deviations(log, ctx)
     features = [d.feature for d in result]
     assert "resource" not in features
+
+
+def test_evaluate_deviations_failed_login_spike_reads_p95_p99() -> None:
+    """失败登录数超过 result_profile p99 时，产出数值偏离并随幅度升高 severity。"""
+    ctx = _make_context(
+        baseline=_HIGH_CONFIDENCE_BASELINE,
+        daily_feature={"failed_login_count": 12},
+    )
+    log = _make_log(src_ip="10.0.0.1", hour=10)
+
+    result = evaluate_deviations(log, ctx)
+
+    failed = [d for d in result if d.deviation_type == "failed_login_spike"]
+    assert len(failed) == 1
+    assert failed[0].feature == "failed_login_count"
+    assert failed[0].profile_group == "result"
+    assert failed[0].expected == "<= 5"
+    assert failed[0].actual == 12
+    assert failed[0].severity == "high"
+    assert failed[0].evidence_source == "daily_feature"
+
+
+def test_evaluate_deviations_download_volume_spike_reads_access_profile_p99() -> None:
+    """下载量超过 access_profile.download_count p99 时，产出下载量偏离。"""
+    baseline = {
+        **_HIGH_CONFIDENCE_BASELINE,
+        "access_profile": {
+            "common_resources": ["/home", "/api/v1"],
+            "download_count": {"p95": 2, "p99": 4},
+        },
+    }
+    ctx = _make_context(baseline=baseline, daily_feature={"download_count": 13})
+    log = _make_log(src_ip="10.0.0.1", resource="/home", hour=10)
+
+    result = evaluate_deviations(log, ctx)
+
+    download = [d for d in result if d.deviation_type == "download_volume_spike"]
+    assert len(download) == 1
+    assert download[0].feature == "download_count"
+    assert download[0].profile_group == "access"
+    assert download[0].expected == "<= 4"
+    assert download[0].actual == 13
+    assert download[0].severity == "critical"
+    assert download[0].evidence_source == "daily_feature"
+
+
+def test_evaluate_deviations_numeric_spike_can_read_log_attrs() -> None:
+    """没有 daily_feature 时，数值偏离可从日志 attrs 读取，证据来源回落为 user_baseline。"""
+    ctx = _make_context(baseline=_HIGH_CONFIDENCE_BASELINE)
+    log = _make_log(src_ip="10.0.0.1", hour=10, attrs={"failed_login_count": 6})
+
+    result = evaluate_deviations(log, ctx)
+
+    failed = [d for d in result if d.deviation_type == "failed_login_spike"]
+    assert len(failed) == 1
+    assert failed[0].severity == "medium"
+    assert failed[0].evidence_source == "user_baseline"
 
 
 # ============================================================================
