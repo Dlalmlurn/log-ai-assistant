@@ -81,7 +81,7 @@ class AnomalyDetectorWorker:
         self._engine = RuleEngine()
         self._batch_seen_sources: set[tuple[str, str, str, str]] = set()
         # 每轮检测前按用户预取一次持久化上下文，避免逐条日志重复查询 ClickHouse 拖慢吞吐。
-        self._round_contexts: dict[tuple[str, str], UserContext] = {}
+        self._round_contexts: dict[tuple[str, str, object], UserContext] = {}
 
     def run_once(self) -> DetectionRunSummary:
         started = time.perf_counter()
@@ -143,22 +143,22 @@ class AnomalyDetectorWorker:
                 self._batch_seen_sources.add(source)
         return anomalies
 
-    def _prefetch_contexts(self, logs: list[NormalizedLog]) -> dict[tuple[str, str], UserContext]:
-        """按 (tenant, user) 去重预取本轮所有用户上下文，每个用户只查一次 ClickHouse。"""
+    def _prefetch_contexts(self, logs: list[NormalizedLog]) -> dict[tuple[str, str, object], UserContext]:
+        """按 (tenant, user, event_date) 预取上下文，保证跨周期事件选对 baseline。"""
 
-        cache: dict[tuple[str, str], UserContext] = {}
+        cache: dict[tuple[str, str, object], UserContext] = {}
         for log in logs:
             if not log.user_id:
                 continue
-            key = (log.tenant_id, log.user_id)
+            key = (log.tenant_id, log.user_id, log.event_time.date())
             if key not in cache:
-                cache[key] = load_user_context(self.storage, log.tenant_id, log.user_id)
+                cache[key] = load_user_context(self.storage, log.tenant_id, log.user_id, log.event_time)
         return cache
 
     def _context_for_log(self, log: NormalizedLog) -> DetectionContext:
-        ctx = self._round_contexts.get((log.tenant_id, log.user_id)) if log.user_id else None
+        ctx = self._round_contexts.get((log.tenant_id, log.user_id, log.event_time.date())) if log.user_id else None
         if ctx is None:
-            ctx = load_user_context(self.storage, log.tenant_id, log.user_id)
+            ctx = load_user_context(self.storage, log.tenant_id, log.user_id, log.event_time)
         deviations = [d.to_dict() for d in evaluate_deviations(log, ctx)]
         baseline_available = ctx.baseline is not None
         source = _source_identity(log)

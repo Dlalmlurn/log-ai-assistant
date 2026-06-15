@@ -26,6 +26,7 @@ Elasticsearch 不再作为当前目标形态的一部分。
 - `docs/07_ai_judgement_feedback_spec.md`
 - `docs/09_data_generation_and_scenarios.md`
 - `docs/10_final_quality_criteria.md`
+- `docs/11_operations_and_acceptance_spec.md`
 
 ## 文档索引
 
@@ -67,6 +68,7 @@ docker compose up --build
 | `flink-jobmanager` / `flink-taskmanager` | Flink 运行环境 | `http://localhost:8081` |
 | `flink-submit` | 提交正式 `raw_logs -> parsed_logs` Flink 作业 | 容器内运行 |
 | `clickhouse` | 主存储和分析引擎 | `http://localhost:8123` |
+| `clickhouse-migrate` | 幂等应用 ADR-010 等增量表结构 | 一次性容器 |
 | `filebeat` | 采集 `logs/*.log` 并写入 Kafka `raw_logs` | 容器内运行 |
 | `anomaly-detector` | 持续检测 `security_logs` 并写入 `anomaly_events` | 容器内运行 |
 | `backend` | FastAPI API 层 | `http://localhost:8000` |

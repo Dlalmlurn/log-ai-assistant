@@ -1,6 +1,14 @@
 export type SourceType = "vpn" | "oa" | "api" | "system" | "file" | "database" | "security_device";
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 export type LogResult = "success" | "fail" | "denied" | "error";
+export type BaselinePeriodType =
+  | "global"
+  | "rolling"
+  | "weekday"
+  | "calendar_month"
+  | "month_phase"
+  | "weekday_month_phase";
+export type BaselineMergeMode = "append" | "replace" | "adjust";
 
 export type HealthResponse = {
   kafka: boolean;
@@ -84,6 +92,8 @@ export type UserBaseline = {
   tenant_id: string;
   user_id: string;
   model_version: string;
+  period_type: BaselinePeriodType;
+  period_key: string;
   trained_from: string;
   trained_to: string;
   sample_days: number;
@@ -97,7 +107,53 @@ export type UserBaseline = {
   result_profile: Record<string, unknown>;
   why_profile: Record<string, unknown>;
   fallback_level?: "none" | "peer_group" | "department" | "global";
+  selected_baseline: {
+    period_type: BaselinePeriodType;
+    period_key: string;
+    fallback_level: string;
+    override_ids: string[];
+    model_version?: string;
+  };
   created_at: string;
+};
+
+export type BaselineOverride = {
+  override_id: string;
+  tenant_id: string;
+  user_id: string;
+  profile_group: "who" | "time" | "location" | "access" | "volume" | "result" | "why";
+  feature_name: string;
+  period_type: BaselinePeriodType;
+  period_key: string;
+  merge_mode: BaselineMergeMode;
+  override_value: Record<string, unknown>;
+  source_type: "manual" | "ai_feedback";
+  source_feedback_id?: string | null;
+  reason: string;
+  status: "pending" | "active" | "rejected" | "revoked" | "expired";
+  effective_from: string;
+  effective_to?: string | null;
+  created_by: string;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  model_version: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type BaselineOverrideCreateRequest = {
+  tenant_id?: string;
+  user_id: string;
+  profile_group: BaselineOverride["profile_group"];
+  feature_name: string;
+  period_type: BaselinePeriodType;
+  period_key: string;
+  merge_mode: BaselineMergeMode;
+  override_value: Record<string, unknown>;
+  reason: string;
+  effective_from: string;
+  effective_to?: string | null;
+  created_by?: string;
 };
 
 export type AIJudgement = {
@@ -128,7 +184,29 @@ export type AIFeedback = {
   target_component: "rule" | "baseline" | "scoring" | "data_contract";
   confidence: number;
   review_status: "pending" | "accepted" | "rejected";
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  review_reason?: string | null;
+  applied_override_id?: string | null;
+  applied_version?: string | null;
   created_at: string;
+};
+
+export type FeedbackReviewRequest = {
+  decision: "accepted" | "rejected";
+  reviewed_by?: string;
+  review_reason: string;
+  override?: Omit<
+    BaselineOverrideCreateRequest,
+    "tenant_id" | "user_id" | "reason" | "created_by"
+  >;
+};
+
+export type FeedbackReviewResponse = {
+  feedback: AIFeedback;
+  override?: BaselineOverride | null;
+  applied_override_id?: string | null;
+  applied_version?: string | null;
 };
 
 export type FeedbackCreateRequest = {

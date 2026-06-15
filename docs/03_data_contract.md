@@ -135,6 +135,8 @@ VPN 日志可以作为第一类结构化日志来源，但不是项目全部日�
 | `tenant_id` | 是 | string | 租户或项目环境 ID。 |
 | `user_id` | 是 | string | 用户或账号。 |
 | `model_version` | 是 | string | baseline 版本。 |
+| `period_type` | 是 | enum | `global`, `rolling`, `weekday`, `calendar_month`, `month_phase`, `weekday_month_phase`。 |
+| `period_key` | 是 | string | 周期值，例如 `all`, `30d`, `monday`, `12`, `month_end`, `monday:month_end`。 |
 | `trained_from` | 是 | date | 训练窗口开始日期。 |
 | `trained_to` | 是 | date | 训练窗口结束日期。 |
 | `sample_days` | 是 | integer | 样本天数。 |
@@ -148,9 +150,39 @@ VPN 日志可以作为第一类结构化日志来源，但不是项目全部日�
 | `result_profile` | 是 | object | 成功率、失败率、错误率等结果分布。 |
 | `why_profile` | 否 | object | 维护窗口、白名单、工单或业务上下文。 |
 | `fallback_level` | 否 | enum | `none`, `peer_group`, `department`, `global`。 |
+| `selected_baseline` | 否 | object | 针对查询或事件时间实际选择的 `period_type`、`period_key`、`fallback_level` 和 `override_ids`。 |
 | `created_at` | 是 | datetime | 生成时间。 |
 
 生成器中的用户画像不得直接写入 `UserBaseline` 作为系统结论。`UserBaseline` 必须来自入库后的历史日志和日级特征。
+
+## BaselineOverride
+
+baseline override 是叠加在统计 baseline 上的受控调整，不是历史统计事实。
+
+| 字段 | 必填 | 类型 | 含义 |
+| --- | --- | --- | --- |
+| `override_id` | 是 | string | 覆盖项 ID。 |
+| `tenant_id` | 是 | string | 租户或项目环境 ID。 |
+| `user_id` | 否 | string | 目标用户；为空时可表示群组级覆盖。 |
+| `profile_group` | 是 | enum | `who`, `time`, `location`, `access`, `volume`, `result`, `why`。 |
+| `feature_name` | 是 | string | 目标 baseline 特征。 |
+| `period_type` | 是 | enum | 与 `UserBaseline.period_type` 一致。 |
+| `period_key` | 是 | string | 目标周期值。 |
+| `merge_mode` | 是 | enum | `append`, `replace`, `adjust`。 |
+| `override_value` | 是 | object | 追加、替换或调整的结构化值。 |
+| `source_type` | 是 | enum | `manual`, `ai_feedback`。 |
+| `source_feedback_id` | 否 | string | 来源 AI 反馈 ID。 |
+| `reason` | 是 | string | 创建和生效原因。 |
+| `status` | 是 | enum | `pending`, `active`, `rejected`, `revoked`, `expired`。 |
+| `effective_from` | 是 | datetime | 开始生效时间。 |
+| `effective_to` | 否 | datetime | 结束生效时间。 |
+| `created_by` | 是 | string | 创建人或系统身份。 |
+| `reviewed_by` | 否 | string | 审核人。 |
+| `reviewed_at` | 否 | datetime | 审核时间。 |
+| `model_version` | 是 | string | 应用该覆盖项后的 baseline 版本。 |
+| `created_at` | 是 | datetime | 创建时间。 |
+
+AI 反馈创建的覆盖项初始状态必须为 `pending`，只有人工接受后才能转为 `active`。授权用户手动创建的覆盖项可以直接为 `active`，但必须有完整审计字段。
 
 ## SeenSource
 
@@ -253,7 +285,7 @@ AI 研判结果必须结构化。
 
 ## AIFeedback
 
-反馈用于后续调优，不直接自动修改生产规则。
+反馈用于后续调优，不直接自动修改生产规则或历史统计 baseline。
 
 | 字段 | 必填 | 类型 | 含义 |
 | --- | --- | --- | --- |
@@ -267,6 +299,10 @@ AI 研判结果必须结构化。
 | `target_component` | 是 | enum | `rule`, `baseline`, `scoring`, `data_contract`。 |
 | `confidence` | 是 | float | 反馈置信度。 |
 | `review_status` | 是 | enum | `pending`, `accepted`, `rejected`。 |
+| `reviewed_by` | 否 | string | 审核人。 |
+| `reviewed_at` | 否 | datetime | 审核时间。 |
+| `applied_override_id` | 否 | string | 接受后生成的 baseline override ID。 |
+| `applied_version` | 否 | string | 接受后生成的 baseline 或规则版本。 |
 | `created_at` | 是 | datetime | 创建时间。 |
 
 ## DataQualityMetric

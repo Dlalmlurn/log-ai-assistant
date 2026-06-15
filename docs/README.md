@@ -13,12 +13,13 @@
 | `02_architecture_overview.md`         | 定义系统主链路、组件职责和边界。                             |
 | `03_data_contract.md`                 | 定义 Kafka topic、标准日志、异常事件、baseline、AI 研判和反馈的数据契约。 |
 | `04_clickhouse_schema.md`             | 定义 ClickHouse 表结构、字段落库规则、分区、排序键和 TTL。   |
-| `05_behavior_modeling_spec.md`        | 定义五W1H、T+1 日级特征和用户行为 baseline。                 |
+| `05_behavior_modeling_spec.md`        | 定义五W1H、T+1 日级特征、周期 baseline 和审核覆盖层。        |
 | `06_detection_and_scoring_spec.md`    | 定义规则检测、baseline 偏离、评分、风险等级和 reason codes。 |
 | `07_ai_judgement_feedback_spec.md`    | 定义 AI 研判输入、输出和反馈机制。                           |
 | `08_api_contract.md`                  | 定义 FastAPI 对外接口和前端使用契约。                        |
 | `09_data_generation_and_scenarios.md` | 定义数据规模、日志类型、场景注入和数据质量要求。             |
 | `10_final_quality_criteria.md`        | 定义项目达到目标形态时应满足的最终质量标准。                 |
+| `11_operations_and_acceptance_spec.md` | 定义周期任务、质量门禁、场景评测和高危通知的运营闭环。       |
 
 ## ADR
 

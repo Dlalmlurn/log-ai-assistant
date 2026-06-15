@@ -14,7 +14,7 @@ AI 的输入对象必须来自统一的 `AnomalyEvent` 证据包。旧式 `Alert
 - AI 输出必须是结构化 JSON。
 - AI 结论必须能追溯到输入证据。
 - AI 输出应进入反馈表，用于辅助校准规则、baseline 和评分。
-- AI 反馈不能未经确认直接修改生产规则。
+- AI 反馈不能未经确认直接修改生产规则或 effective baseline。
 
 ## AI 候选事件
 
@@ -136,7 +136,7 @@ AI 输出应写入两个对象：
 
 ## 反馈治理
 
-AI 反馈不得直接自动修改生产规则。
+AI 反馈不得直接自动修改生产规则或历史统计 baseline。
 
 可采用以下流程：
 
@@ -144,7 +144,8 @@ AI 反馈不得直接自动修改生产规则。
 AI feedback
   -> pending
   -> accepted or rejected
-  -> rule config / baseline config update
+  -> accepted 时生成 rule candidate 或 baseline override
+  -> override active / revoked / expired
   -> new model_version or rule_version
 ```
 
@@ -152,9 +153,29 @@ AI feedback
 
 - 关联事件。
 - 采纳时间。
+- 审核人。
 - 影响组件。
+- 目标 profile、feature 和周期范围。
+- 合并方式和生效值。
+- 生效时间和失效时间。
 - 新版本号。
 - 影响说明。
+
+### baseline 反馈
+
+`baseline_threshold`、`false_positive` 或其他面向 baseline 的建议，在审核通过后写入 `ueba_baseline_overrides`，而不是更新或删除 `ueba_user_baseline` 历史行。
+
+允许的覆盖方式包括：
+
+- `append`：追加常见来源、时间段、资源或白名单。
+- `replace`：在指定用户、周期和有效期内替换阈值。
+- `adjust`：调整数值阈值或容忍区间。
+
+检测器应在运行时合并统计 baseline 和 active override，并把使用的 override ID 与版本写入偏离证据。
+
+### 人工追加
+
+授权分析人员可以不依赖 AI，直接创建 baseline override。人工追加必须记录操作者、理由、作用周期、有效期和版本，并支持撤销。人工追加不允许伪装成统计学习结果。
 
 ## mock 输出要求
 
@@ -168,4 +189,5 @@ mock 输出必须明确标记，不能伪装成真实模型结果。
 - 让 AI 单独决定异常是否成立。
 - 不提供 baseline 证据就要求 AI 判断攻击类型。
 - AI 输出自然语言长文但不落结构化字段。
-- AI 反馈直接修改生产规则。
+- AI 反馈未经审核直接修改生产规则或 effective baseline。
+- AI 或人工反馈原地覆盖历史统计 baseline。

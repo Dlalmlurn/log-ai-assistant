@@ -21,6 +21,17 @@ FeedbackType = Literal[
 ]
 FeedbackTargetComponent = Literal["rule", "baseline", "scoring", "data_contract"]
 ReviewStatus = Literal["pending", "accepted", "rejected"]
+BaselinePeriodType = Literal[
+    "global",
+    "rolling",
+    "weekday",
+    "calendar_month",
+    "month_phase",
+    "weekday_month_phase",
+]
+BaselineMergeMode = Literal["append", "replace", "adjust"]
+BaselineOverrideSource = Literal["manual", "ai_feedback"]
+BaselineOverrideStatus = Literal["pending", "active", "rejected", "revoked", "expired"]
 ResponseItemT = TypeVar("ResponseItemT")
 
 
@@ -155,6 +166,11 @@ class AIFeedback(BaseModel):
     target_component: FeedbackTargetComponent
     confidence: float = Field(ge=0, le=1)
     review_status: ReviewStatus = "pending"
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+    review_reason: str | None = None
+    applied_override_id: str | None = None
+    applied_version: str | None = None
     created_at: datetime
 
 
@@ -207,6 +223,8 @@ class UserBaseline(BaseModel):
     tenant_id: str
     user_id: str
     model_version: str
+    period_type: BaselinePeriodType = "global"
+    period_key: str = "all"
     trained_from: date
     trained_to: date
     sample_days: int = Field(ge=0)
@@ -222,7 +240,79 @@ class UserBaseline(BaseModel):
     why_profile: dict[str, Any] = Field(default_factory=dict)
 
     fallback_level: FallbackLevel = "none"
+    selected_baseline: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+
+
+class BaselineOverride(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    override_id: str
+    tenant_id: str = "default"
+    user_id: str = ""
+    profile_group: Literal["who", "time", "location", "access", "volume", "result", "why"]
+    feature_name: str
+    period_type: BaselinePeriodType
+    period_key: str
+    merge_mode: BaselineMergeMode
+    override_value: dict[str, Any]
+    source_type: BaselineOverrideSource
+    source_feedback_id: str | None = None
+    reason: str
+    status: BaselineOverrideStatus
+    effective_from: datetime
+    effective_to: datetime | None = None
+    created_by: str
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+    model_version: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class BaselineOverrideCreateRequest(BaseModel):
+    tenant_id: str = "default"
+    user_id: str
+    profile_group: Literal["who", "time", "location", "access", "volume", "result", "why"]
+    feature_name: str
+    period_type: BaselinePeriodType
+    period_key: str
+    merge_mode: BaselineMergeMode
+    override_value: dict[str, Any]
+    reason: str = Field(min_length=1)
+    effective_from: datetime
+    effective_to: datetime | None = None
+    created_by: str = Field(default="analyst", min_length=1)
+
+
+class BaselineOverrideRevokeRequest(BaseModel):
+    revoked_by: str = Field(default="analyst", min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class FeedbackReviewOverride(BaseModel):
+    profile_group: Literal["who", "time", "location", "access", "volume", "result", "why"]
+    feature_name: str
+    period_type: BaselinePeriodType
+    period_key: str
+    merge_mode: BaselineMergeMode
+    override_value: dict[str, Any]
+    effective_from: datetime
+    effective_to: datetime | None = None
+
+
+class FeedbackReviewRequest(BaseModel):
+    decision: Literal["accepted", "rejected"]
+    reviewed_by: str = Field(default="analyst", min_length=1)
+    review_reason: str = Field(min_length=1)
+    override: FeedbackReviewOverride | None = None
+
+
+class FeedbackReviewResponse(BaseModel):
+    feedback: AIFeedback
+    override: BaselineOverride | None = None
+    applied_override_id: str | None = None
+    applied_version: str | None = None
 
 
 class DataQualityMetric(BaseModel):
@@ -333,6 +423,14 @@ class AnomalyEventListResponse(ListResponse[AnomalyEvent]):
 
 class UserBaselineListResponse(ListResponse[UserBaseline]):
     """Reusable list response for user baselines."""
+
+
+class BaselineOverrideListResponse(ListResponse[BaselineOverride]):
+    """Reusable list response for baseline overrides."""
+
+
+class AIFeedbackListResponse(ListResponse[AIFeedback]):
+    """Reusable list response for AI feedback."""
 
 
 class AIJudgementListResponse(ListResponse[AIJudgement]):

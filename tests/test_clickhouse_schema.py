@@ -3,6 +3,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INIT_SQL = PROJECT_ROOT / "sql" / "clickhouse" / "01_init.sql"
+ADR010_MIGRATION_SQL = PROJECT_ROOT / "sql" / "clickhouse" / "02_adr010_migration.sql"
 
 
 def test_clickhouse_init_sql_defines_remaining_p0_tables() -> None:
@@ -10,6 +11,7 @@ def test_clickhouse_init_sql_defines_remaining_p0_tables() -> None:
 
     for table_name in (
         "user_seen_sources",
+        "ueba_baseline_overrides",
         "daily_security_reports",
         "data_quality_metrics",
         "system_metrics",
@@ -20,6 +22,10 @@ def test_clickhouse_init_sql_defines_remaining_p0_tables() -> None:
     assert "ReplacingMergeTree(created_at)" in sql
     assert "security_logs_count UInt64 DEFAULT 0" in sql
     assert "labels String DEFAULT '{}'" in sql
+    assert "period_type LowCardinality(String) DEFAULT 'global'" in sql
+    assert "period_key String DEFAULT 'all'" in sql
+    assert "reviewed_by String DEFAULT ''" in sql
+    assert "applied_override_id String DEFAULT ''" in sql
 
 
 def test_clickhouse_init_sql_wires_parsed_logs_kafka_sink() -> None:
@@ -38,3 +44,13 @@ def test_clickhouse_init_sql_wires_parsed_logs_kafka_sink() -> None:
     assert "JSONExtract(raw, 'risk_tags', 'Array(String)')" in sql
     assert "ENGINE = ReplacingMergeTree(ingest_time)" in sql
     assert "ORDER BY (tenant_id, event_id, event_date, user_id, src_ip, source_type, event_time)" in sql
+
+
+def test_adr010_migration_is_idempotent_for_existing_clickhouse_volumes() -> None:
+    sql = ADR010_MIGRATION_SQL.read_text(encoding="utf-8")
+
+    assert "ADD COLUMN IF NOT EXISTS period_type" in sql
+    assert "ADD COLUMN IF NOT EXISTS period_key" in sql
+    assert "CREATE TABLE IF NOT EXISTS log_ai.ueba_baseline_overrides" in sql
+    assert "ADD COLUMN IF NOT EXISTS reviewed_by" in sql
+    assert "ADD COLUMN IF NOT EXISTS applied_override_id" in sql

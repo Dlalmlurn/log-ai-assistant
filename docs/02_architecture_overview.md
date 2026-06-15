@@ -43,8 +43,27 @@ docker compose up --build
 | FastAPI | 封装查询、分析、状态、AI 研判和反馈接口。 | 不把数据库细节暴露给前端。 |
 | React | 提供安全运营工作台。 | 不生成核心业务数据，不直连底层组件。 |
 | AI 服务 | 对高可疑事件进行证据化研判，并产出反馈建议。 | 不分析全量日志，不替代规则和 baseline。 |
+| 运营控制面 | 调度 baseline、日报、质量对账和场景评测，记录运行状态并驱动通知 outbox。 | 不复制领域计算，不修改异常事实。 |
 
 ## 数据路径
+
+### 运营任务路径
+
+```text
+operations-runner
+  -> data watermark
+  -> daily features / baseline / quality / report
+  -> task runs and acceptance reports
+  -> FastAPI
+  -> React
+
+AnomalyEvent high/critical
+  -> notification outbox
+  -> notification worker
+  -> webhook adapter
+```
+
+运营控制面只负责编排和记录。baseline、质量、日报和场景评测仍调用各自领域模块，通知失败不回写或覆盖 `AnomalyEvent`。
 
 ### 原始日志路径
 
@@ -91,7 +110,9 @@ anomaly_events
   -> AI judgement
   -> ai_judgements
   -> ai_feedback
-  -> rule and baseline tuning candidates
+  -> human review
+  -> rule candidates / baseline overrides
+  -> new rule_version / model_version
 ```
 
 ## 正式路径和辅助工具
@@ -140,7 +161,8 @@ Elasticsearch 不进入运行时依赖。
 历史建模负责：
 
 - 生成日级用户特征。
-- 更新用户 baseline。
+- 更新全局、滚动、星期和月度周期 baseline。
+- 解析周期 fallback，并合并有效的 baseline override。
 - 提供常见来源、常见时间、常见行为和样本置信度。
 - 提供新来源、新设备、新地点判断所需的持久化依据。
 
@@ -162,6 +184,7 @@ AI 负责：
 - 前端不感知底层数据库类型。
 - API 不绑定 ClickHouse 表名作为外部契约。
 - baseline 必须来自历史数据统计，而不是硬编码结论。
+- 人工和 AI 调整必须进入可审计的 override 层，不得覆盖历史统计 baseline。
 - 生成器画像不能直接作为用户 baseline。
 - 新来源判断不能只依赖进程内存。
 - 风险评分必须可解释。

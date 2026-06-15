@@ -8,6 +8,8 @@
 
 实时流不承担完整 baseline 计算。
 
+周期切分和反馈覆盖方式由 `ADR-010-periodic-baselines-and-reviewed-overrides.md` 补充。
+
 ## Context
 
 当前 baseline 和异常评分已有初步实现，但容易被认为是硬编码规则。导师建议基于 Who、When、Where、What、Why、How 构建行为基线，并优先使用历史数据。

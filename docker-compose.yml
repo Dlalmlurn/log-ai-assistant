@@ -69,6 +69,29 @@ services:
       timeout: 5s
       retries: 12
 
+  clickhouse-migrate:
+    image: ${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:24.8}
+    container_name: clickhouse-migrate
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-log_ai}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+    volumes:
+      - ./sql/clickhouse/02_adr010_migration.sql:/migration/02_adr010_migration.sql:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        clickhouse-client
+        --host clickhouse
+        --database "$$CLICKHOUSE_DATABASE"
+        --user "$$CLICKHOUSE_USER"
+        --password "$$CLICKHOUSE_PASSWORD"
+        --multiquery
+        < /migration/02_adr010_migration.sql
+
   flink-jobmanager:
     build:
       context: .
@@ -150,8 +173,8 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
-      clickhouse:
-        condition: service_healthy
+      clickhouse-migrate:
+        condition: service_completed_successfully
       flink-jobmanager:
         condition: service_healthy
     healthcheck:
@@ -177,8 +200,8 @@ services:
     volumes:
       - ./src:/app/src:ro
     depends_on:
-      clickhouse:
-        condition: service_healthy
+      clickhouse-migrate:
+        condition: service_completed_successfully
     command:
       [
         "python",

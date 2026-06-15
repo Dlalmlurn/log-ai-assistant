@@ -204,6 +204,17 @@ p {
   background: #115e59;
 }
 
+.icon-button.danger {
+  border-color: #dca69d;
+  color: #8a2f20;
+  background: #fff4f1;
+}
+
+.icon-button.danger:hover {
+  border-color: #b23b2e;
+  background: #ffe9e4;
+}
+
 .icon-button svg {
   width: 16px;
   height: 16px;
@@ -232,6 +243,109 @@ p {
   border-radius: 8px;
   color: #0d5f3d;
   background: #ecfbf1;
+}
+
+.governance-section {
+  display: grid;
+  gap: 16px;
+  padding-top: 24px;
+  border-top: 1px solid #d6e0e8;
+}
+
+.section-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.section-heading h2 {
+  margin-top: 4px;
+}
+
+.section-heading > span {
+  color: #607286;
+  font-size: 13px;
+}
+
+.governance-layout {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.8fr) minmax(480px, 1.2fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.management-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #d6e0e8;
+  border-radius: 10px;
+  background: #f8fbfc;
+}
+
+.management-form label {
+  display: grid;
+  gap: 6px;
+  color: #607286;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.management-form input,
+.management-form select,
+.management-form textarea {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid #c9d5df;
+  border-radius: 8px;
+  color: #17202a;
+  background: #ffffff;
+  font: inherit;
+  resize: vertical;
+}
+
+.management-form input:focus,
+.management-form select:focus,
+.management-form textarea:focus {
+  outline: 2px solid #9edbd5;
+  outline-offset: 1px;
+  border-color: #0f766e;
+}
+
+.form-span-2,
+.form-submit {
+  grid-column: 1 / -1;
+}
+
+.override-list {
+  display: grid;
+  gap: 12px;
+}
+
+.override-card {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #d6e0e8;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.override-card h3,
+.feedback-review-card h3 {
+  margin: 4px 0 0;
+}
+
+.compact-form {
+  padding: 12px;
+}
+
+.review-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .status-summary {
@@ -1660,6 +1774,10 @@ body {
   .filters {
     grid-template-columns: repeat(2, minmax(180px, 1fr));
   }
+
+  .governance-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 760px) {
@@ -1675,5 +1793,19 @@ body {
     grid-column: auto;
     grid-template-columns: 1fr;
     min-width: 0;
+  }
+
+  .management-form {
+    grid-template-columns: 1fr;
+  }
+
+  .form-span-2,
+  .form-submit {
+    grid-column: auto;
+  }
+
+  .review-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 }

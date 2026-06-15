@@ -19,17 +19,24 @@ from src.health import HealthResponse, get_health_status
 from src.report.daily_report import generate_daily_report
 from src.schemas import (
     AIFeedback,
+    AIFeedbackListResponse,
     AIJudgement,
     AIJudgementListResponse,
     AnomalyDetailResponse,
     AnomalyEvent,
     AnomalyEventListResponse,
     BaselineRebuildResponse,
+    BaselineOverride,
+    BaselineOverrideCreateRequest,
+    BaselineOverrideListResponse,
+    BaselineOverrideRevokeRequest,
     DailyReport,
     DailyReportListResponse,
     ErrorResponse,
     EvidenceChain,
     FeedbackCreateRequest,
+    FeedbackReviewRequest,
+    FeedbackReviewResponse,
     LogAggregateRequest,
     LogAggregateResponse,
     NormalizedLog,
@@ -525,6 +532,137 @@ def rebuild_baselines(
 
 
 @app.get(
+    "/api/v1/baselines/overrides",
+    response_model=BaselineOverrideListResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["baselines"],
+    summary="Query baseline overrides",
+    description="REQ-003, REQ-006: query manual and reviewed baseline overrides.",
+)
+def list_baseline_overrides(
+    tenant_id: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    source_type: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1),
+    offset: int = Query(default=0, ge=0),
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> BaselineOverrideListResponse:
+    try:
+        items, total = storage.list_baseline_overrides(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            status=status,
+            source_type=source_type,
+            limit=limit,
+            offset=offset,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "clickhouse_query_failed",
+                "message": "Failed to query baseline overrides from ClickHouse",
+                "details": {"table": "ueba_baseline_overrides"},
+            },
+        ) from exc
+    return BaselineOverrideListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@app.post(
+    "/api/v1/baselines/overrides",
+    response_model=BaselineOverride,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["baselines"],
+    summary="Create a manual baseline override",
+    description="REQ-003: append an auditable manual policy layer without changing statistical baselines.",
+)
+def create_baseline_override(
+    request: BaselineOverrideCreateRequest,
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> BaselineOverride:
+    _validate_effective_range(request.effective_from, request.effective_to)
+    now = datetime.now(timezone.utc)
+    override = BaselineOverride(
+        override_id=f"override-{uuid.uuid4()}",
+        **request.model_dump(),
+        source_type="manual",
+        status="active",
+        reviewed_by=request.created_by,
+        reviewed_at=now,
+        model_version=_new_effective_version(),
+        created_at=now,
+        updated_at=now,
+    )
+    try:
+        storage.insert_baseline_override(override)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "baseline_override_write_failed",
+                "message": "Failed to create baseline override",
+                "details": {"table": "ueba_baseline_overrides", "user_id": request.user_id},
+            },
+        ) from exc
+    return override
+
+
+@app.post(
+    "/api/v1/baselines/overrides/{override_id}/revoke",
+    response_model=BaselineOverride,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["baselines"],
+    summary="Revoke a baseline override",
+    description="REQ-003: revoke an active override while retaining its audit history.",
+)
+def revoke_baseline_override(
+    override_id: str,
+    request: BaselineOverrideRevokeRequest,
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> BaselineOverride:
+    try:
+        existing = storage.get_baseline_override(override_id)
+        if existing is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "baseline_override_not_found",
+                    "message": "Baseline override not found",
+                    "details": {"override_id": override_id},
+                },
+            )
+        if str(existing.get("status")) not in {"active", "pending"}:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "baseline_override_not_active",
+                    "message": "Only active or pending overrides can be revoked",
+                    "details": {"override_id": override_id, "status": existing.get("status")},
+                },
+            )
+        updated = storage.update_baseline_override_status(
+            override_id,
+            status="revoked",
+            reviewed_by=request.revoked_by,
+            reason=request.reason,
+            updated_at=datetime.now(timezone.utc),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "baseline_override_revoke_failed",
+                "message": "Failed to revoke baseline override",
+                "details": {"override_id": override_id},
+            },
+        ) from exc
+    return BaselineOverride(**updated)
+
+
+@app.get(
     "/api/v1/baselines/users/{user_id}",
     response_model=UserBaseline,
     responses=STANDARD_ERROR_RESPONSES,
@@ -637,6 +775,171 @@ def create_feedback(
             },
         ) from exc
     return feedback
+
+
+@app.get(
+    "/api/v1/feedback",
+    response_model=AIFeedbackListResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["feedback"],
+    summary="Query AI and analyst feedback",
+    description="REQ-004, REQ-006: query pending and reviewed feedback for governance.",
+)
+def list_feedback(
+    tenant_id: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+    review_status: str | None = Query(default=None),
+    target_component: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1),
+    offset: int = Query(default=0, ge=0),
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> AIFeedbackListResponse:
+    try:
+        items, total = storage.list_feedback(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            review_status=review_status,
+            target_component=target_component,
+            limit=limit,
+            offset=offset,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "clickhouse_query_failed",
+                "message": "Failed to query AI feedback from ClickHouse",
+                "details": {"table": "ai_feedback"},
+            },
+        ) from exc
+    return AIFeedbackListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@app.post(
+    "/api/v1/feedback/{feedback_id}/review",
+    response_model=FeedbackReviewResponse,
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["feedback"],
+    summary="Review AI feedback",
+    description="REQ-003, REQ-004: accept or reject feedback and create a versioned baseline override when required.",
+)
+def review_feedback(
+    feedback_id: str,
+    request: FeedbackReviewRequest,
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> FeedbackReviewResponse:
+    try:
+        existing = storage.get_feedback(feedback_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "feedback_query_failed",
+                "message": "Failed to query AI feedback",
+                "details": {"feedback_id": feedback_id},
+            },
+        ) from exc
+    if existing is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "feedback_not_found",
+                "message": "AI feedback not found",
+                "details": {"feedback_id": feedback_id},
+            },
+        )
+    if str(existing.get("review_status") or "pending") != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "feedback_already_reviewed",
+                "message": "AI feedback has already been reviewed",
+                "details": {"feedback_id": feedback_id, "review_status": existing.get("review_status")},
+            },
+        )
+
+    now = datetime.now(timezone.utc)
+    applied_override: BaselineOverride | None = None
+    if request.decision == "accepted" and str(existing.get("target_component")) == "baseline":
+        if request.override is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "baseline_override_required",
+                    "message": "Accepted baseline feedback requires override details",
+                    "details": {"feedback_id": feedback_id},
+                },
+            )
+        _validate_effective_range(request.override.effective_from, request.override.effective_to)
+        applied_override = BaselineOverride(
+            override_id=f"override-{uuid.uuid4()}",
+            tenant_id=str(existing.get("tenant_id") or "default"),
+            user_id=str(existing.get("user_id") or ""),
+            **request.override.model_dump(),
+            source_type="ai_feedback",
+            source_feedback_id=feedback_id,
+            reason=request.review_reason,
+            status="active",
+            created_by="ai-feedback-review",
+            reviewed_by=request.reviewed_by,
+            reviewed_at=now,
+            model_version=_new_effective_version(),
+            created_at=now,
+            updated_at=now,
+        )
+
+    applied_override_id = applied_override.override_id if applied_override else ""
+    applied_version = applied_override.model_version if applied_override else ""
+    try:
+        if applied_override is not None:
+            storage.insert_baseline_override(applied_override)
+        storage.update_feedback_review(
+            feedback_id,
+            review_status=request.decision,
+            reviewed_by=request.reviewed_by,
+            reviewed_at=now,
+            review_reason=request.review_reason,
+            applied_override_id=applied_override_id,
+            applied_version=applied_version,
+        )
+    except Exception as exc:
+        if applied_override is not None:
+            try:
+                storage.update_baseline_override_status(
+                    applied_override.override_id,
+                    status="revoked",
+                    reviewed_by=request.reviewed_by,
+                    reason="Compensating revoke because feedback review persistence failed.",
+                    updated_at=datetime.now(timezone.utc),
+                )
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "feedback_review_failed",
+                "message": "Failed to review feedback and apply its governed change",
+                "details": {"feedback_id": feedback_id},
+            },
+        ) from exc
+
+    feedback = AIFeedback(
+        **{
+            **existing,
+            "review_status": request.decision,
+            "reviewed_by": request.reviewed_by,
+            "reviewed_at": now,
+            "review_reason": request.review_reason,
+            "applied_override_id": applied_override_id or None,
+            "applied_version": applied_version or None,
+        }
+    )
+    return FeedbackReviewResponse(
+        feedback=feedback,
+        override=applied_override,
+        applied_override_id=applied_override_id or None,
+        applied_version=applied_version or None,
+    )
 
 
 @app.get(
@@ -867,7 +1170,12 @@ def _fetch_alert_baseline(storage: ClickHouseStorage, alert: dict[str, Any]) -> 
     if not user_id:
         return {}
 
-    item = storage.get_user_baseline(str(user_id), tenant_id=str(alert.get("tenant_id") or "default"))
+    event_time = _parse_datetime_value(alert.get("event_time"))
+    item = storage.get_user_baseline(
+        str(user_id),
+        tenant_id=str(alert.get("tenant_id") or "default"),
+        baseline_date=event_time.date() if event_time else None,
+    )
     return item or {}
 
 
@@ -1268,3 +1576,23 @@ def _numeric(value: Any) -> float | None:
         return float(str(value))
     except ValueError:
         return None
+
+
+def _new_effective_version() -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    return f"baseline-effective-{timestamp}-{uuid.uuid4().hex[:8]}"
+
+
+def _validate_effective_range(effective_from: datetime, effective_to: datetime | None) -> None:
+    if effective_to is not None and effective_to <= effective_from:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_effective_range",
+                "message": "effective_to must be later than effective_from",
+                "details": {
+                    "effective_from": effective_from.isoformat(),
+                    "effective_to": effective_to.isoformat(),
+                },
+            },
+        )

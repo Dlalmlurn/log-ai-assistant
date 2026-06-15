@@ -11,6 +11,7 @@ evaluate_deviations 为纯函数，缺少用户基线时返回样本不足降级
 """
 
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any, Literal, Protocol
 
 DeviationType = Literal[
@@ -74,9 +75,14 @@ class BaselineDeviation:
     confidence: float
     evidence_source: str
     sample_days: int
+    period_type: str | None = None
+    period_key: str | None = None
+    model_version: str | None = None
+    override_ids: tuple[str, ...] = ()
+    fallback_level: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "feature": self.feature,
             "profile_group": self.profile_group,
             "expected": self.expected,
@@ -87,6 +93,17 @@ class BaselineDeviation:
             "evidence_source": self.evidence_source,
             "sample_days": self.sample_days,
         }
+        if self.period_type:
+            payload["period_type"] = self.period_type
+        if self.period_key:
+            payload["period_key"] = self.period_key
+        if self.model_version:
+            payload["model_version"] = self.model_version
+        if self.override_ids:
+            payload["override_ids"] = list(self.override_ids)
+        if self.fallback_level:
+            payload["fallback_level"] = self.fallback_level
+        return payload
 
 
 @dataclass(frozen=True)
@@ -116,12 +133,14 @@ def load_user_context(
     storage: DeviationStorage,
     tenant_id: str,
     user_id: str | None,
+    event_time: date | datetime | None = None,
 ) -> UserContext:
     """加载单用户持久化上下文（基线 + seen_sources）。"""
     if not user_id:
         return UserContext(tenant_id=tenant_id, user_id=None)
 
-    baseline = storage.get_user_baseline(user_id, tenant_id=tenant_id)
+    baseline_date = event_time.date() if isinstance(event_time, datetime) else event_time
+    baseline = storage.get_user_baseline(user_id, tenant_id=tenant_id, baseline_date=baseline_date)
     rows = storage.query_user_seen_sources(
         tenant_id=tenant_id,
         user_id=user_id,
@@ -171,7 +190,8 @@ def evaluate_deviations(log: Any, context: UserContext) -> list[BaselineDeviatio
     src_ip_is_seen = bool(src_ip and src_ip in context.seen_sources)
     if src_ip and not src_ip_is_common and not src_ip_is_seen and (common_ips or context.seen_sources):
         deviations.append(
-            BaselineDeviation(
+            _baseline_deviation(
+                context,
                 feature="src_ip",
                 profile_group="location",
                 expected=common_ips or sorted(context.seen_sources),
@@ -189,7 +209,8 @@ def evaluate_deviations(log: Any, context: UserContext) -> list[BaselineDeviatio
     event_hour = getattr(log.event_time, "hour", 0) if hasattr(log, "event_time") else 0
     if active_hours and not _hour_in_ranges(event_hour, active_hours):
         deviations.append(
-            BaselineDeviation(
+            _baseline_deviation(
+                context,
                 feature="event_hour",
                 profile_group="time",
                 expected=active_hours,
@@ -207,7 +228,8 @@ def evaluate_deviations(log: Any, context: UserContext) -> list[BaselineDeviatio
     resource = getattr(log, "resource", None)
     if resource and common_resources and resource not in common_resources:
         deviations.append(
-            BaselineDeviation(
+            _baseline_deviation(
+                context,
                 feature="resource",
                 profile_group="access",
                 expected=common_resources,
@@ -229,7 +251,8 @@ def evaluate_deviations(log: Any, context: UserContext) -> list[BaselineDeviatio
         and failed_login_count > failed_login_threshold
     ):
         deviations.append(
-            BaselineDeviation(
+            _baseline_deviation(
+                context,
                 feature="failed_login_count",
                 profile_group="result",
                 expected=f"<= {failed_login_threshold:g}",
@@ -250,7 +273,8 @@ def evaluate_deviations(log: Any, context: UserContext) -> list[BaselineDeviatio
         and download_count > download_threshold
     ):
         deviations.append(
-            BaselineDeviation(
+            _baseline_deviation(
+                context,
                 feature="download_count",
                 profile_group="access",
                 expected=f"<= {download_threshold:g}",
@@ -322,7 +346,8 @@ def _fallback_deviation(
     severity: str,
     evidence_source: str,
 ) -> BaselineDeviation:
-    return BaselineDeviation(
+    return _baseline_deviation(
+        context,
         feature="baseline_history",
         profile_group="why",
         expected="sufficient_user_baseline",
@@ -332,6 +357,20 @@ def _fallback_deviation(
         confidence=context.confidence,
         evidence_source=evidence_source,
         sample_days=context.sample_days,
+    )
+
+
+def _baseline_deviation(context: UserContext, **payload: Any) -> BaselineDeviation:
+    baseline = context.baseline or {}
+    selected = baseline.get("selected_baseline")
+    selected = selected if isinstance(selected, dict) else {}
+    return BaselineDeviation(
+        **payload,
+        period_type=str(selected.get("period_type") or baseline.get("period_type") or "") or None,
+        period_key=str(selected.get("period_key") or baseline.get("period_key") or "") or None,
+        model_version=str(selected.get("model_version") or baseline.get("model_version") or "") or None,
+        override_ids=tuple(str(item) for item in selected.get("override_ids", []) if item),
+        fallback_level=str(selected.get("fallback_level") or baseline.get("fallback_level") or "") or None,
     )
 
 
