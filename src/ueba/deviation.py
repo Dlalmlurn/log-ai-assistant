@@ -6,7 +6,8 @@ from __future__ import annotations
 - BaselineDeviation / evaluate_deviations：基于 UserContext 评估每条日志的 baseline 偏离，
   产出 9 字段契约证据数组；低置信度基线（confidence < 0.6）触发 severity 动态降级。
 
-evaluate_deviations 为纯函数，无 baseline 时返回空列表，保证 RuleEngine 离线可测性。
+evaluate_deviations 为纯函数，缺少用户基线时返回样本不足降级证据，而不把“没有历史”
+误判为“没有偏离”。
 """
 
 from dataclasses import dataclass, field
@@ -17,10 +18,15 @@ DeviationType = Literal[
     "new_source_ip",
     "new_geo_location",
     "failed_login_spike",
+    "download_volume_spike",
+    "insufficient_history",
+    "low_baseline_confidence",
+    "peer_group_fallback",
+    "global_baseline_fallback",
     "sensitive_resource_access",
     "outside_active_hours",
 ]
-EvidenceSource = Literal["user_baseline", "seen_sources", "daily_feature"]
+EvidenceSource = Literal["user_baseline", "seen_sources", "daily_feature", "peer_group", "global"]
 Severity = Literal["low", "medium", "high", "critical"]
 
 _SEVERITY_DOWNGRADE: dict[str, str] = {
@@ -91,6 +97,7 @@ class UserContext:
     user_id: str | None
     baseline: dict[str, Any] | None = None
     seen_sources: set[str] = field(default_factory=set)
+    daily_feature: dict[str, Any] | None = None
 
     @property
     def sample_days(self) -> int:
@@ -140,26 +147,39 @@ def _safe_severity(severity: str, confidence: float) -> str:
 def evaluate_deviations(log: Any, context: UserContext) -> list[BaselineDeviation]:
     """评估单条日志的所有 baseline 偏离，输出 9 字段契约。"""
     if context.baseline is None:
-        return []
+        return [_fallback_deviation(log, context, "insufficient_history", "medium", "global")]
 
     deviations: list[BaselineDeviation] = []
     conf = context.confidence
     days = context.sample_days
+    fallback_level = str(context.baseline.get("fallback_level") or "none")
+    if conf < 0.6:
+        deviations.append(
+            _fallback_deviation(
+                log,
+                context,
+                _fallback_type(fallback_level, conf),
+                "low",
+                _fallback_source(fallback_level),
+            )
+        )
 
     location_profile = _dict_value(context.baseline.get("location_profile"))
     common_ips = _common_values(location_profile.get("common_ips"))
     src_ip = getattr(log, "src_ip", None)
-    if src_ip and common_ips and src_ip not in common_ips:
+    src_ip_is_common = bool(src_ip and common_ips and src_ip in common_ips)
+    src_ip_is_seen = bool(src_ip and src_ip in context.seen_sources)
+    if src_ip and not src_ip_is_common and not src_ip_is_seen and (common_ips or context.seen_sources):
         deviations.append(
             BaselineDeviation(
                 feature="src_ip",
                 profile_group="location",
-                expected=common_ips,
+                expected=common_ips or sorted(context.seen_sources),
                 actual=src_ip,
                 deviation_type="new_source_ip",
                 severity=_safe_severity("high", conf),
                 confidence=conf,
-                evidence_source="user_baseline",
+                evidence_source="user_baseline" if common_ips else "seen_sources",
                 sample_days=days,
             )
         )
@@ -196,6 +216,49 @@ def evaluate_deviations(log: Any, context: UserContext) -> list[BaselineDeviatio
                 severity=_safe_severity("high", conf),
                 confidence=conf,
                 evidence_source="user_baseline",
+                sample_days=days,
+            )
+        )
+
+    result_profile = _dict_value(context.baseline.get("result_profile"))
+    failed_login_count = _metric_value(log, context.daily_feature, "failed_login_count")
+    failed_login_threshold = _profile_threshold(result_profile, "failed_login_count")
+    if (
+        failed_login_count is not None
+        and failed_login_threshold is not None
+        and failed_login_count > failed_login_threshold
+    ):
+        deviations.append(
+            BaselineDeviation(
+                feature="failed_login_count",
+                profile_group="result",
+                expected=f"<= {failed_login_threshold:g}",
+                actual=_display_number(failed_login_count),
+                deviation_type="failed_login_spike",
+                severity=_safe_severity(_numeric_severity(failed_login_count, failed_login_threshold), conf),
+                confidence=conf,
+                evidence_source=_metric_evidence_source(context.daily_feature),
+                sample_days=days,
+            )
+        )
+
+    download_count = _metric_value(log, context.daily_feature, "download_count")
+    download_threshold = _profile_threshold(access_profile, "download_count")
+    if (
+        download_count is not None
+        and download_threshold is not None
+        and download_count > download_threshold
+    ):
+        deviations.append(
+            BaselineDeviation(
+                feature="download_count",
+                profile_group="access",
+                expected=f"<= {download_threshold:g}",
+                actual=_display_number(download_count),
+                deviation_type="download_volume_spike",
+                severity=_safe_severity(_numeric_severity(download_count, download_threshold), conf),
+                confidence=conf,
+                evidence_source=_metric_evidence_source(context.daily_feature),
                 sample_days=days,
             )
         )
@@ -250,3 +313,97 @@ def _parse_hour(value: str) -> int | None:
         return None
     hour = int(raw)
     return hour if 0 <= hour <= 23 else None
+
+
+def _fallback_deviation(
+    log: Any,
+    context: UserContext,
+    deviation_type: str,
+    severity: str,
+    evidence_source: str,
+) -> BaselineDeviation:
+    return BaselineDeviation(
+        feature="baseline_history",
+        profile_group="why",
+        expected="sufficient_user_baseline",
+        actual=_fallback_actual(log, context),
+        deviation_type=deviation_type,
+        severity=severity,
+        confidence=context.confidence,
+        evidence_source=evidence_source,
+        sample_days=context.sample_days,
+    )
+
+
+def _fallback_actual(log: Any, context: UserContext) -> str:
+    user_id = context.user_id or getattr(log, "user_id", None) or "unknown"
+    if context.baseline is None:
+        return f"user {user_id} has no baseline"
+    return f"confidence {context.confidence:g}, sample_days {context.sample_days}"
+
+
+def _fallback_type(fallback_level: str, confidence: float) -> str:
+    if fallback_level == "peer_group":
+        return "peer_group_fallback"
+    if fallback_level in {"department", "global"}:
+        return "global_baseline_fallback"
+    if confidence < 0.6:
+        return "low_baseline_confidence"
+    return "insufficient_history"
+
+
+def _fallback_source(fallback_level: str) -> str:
+    if fallback_level == "peer_group":
+        return "peer_group"
+    if fallback_level in {"department", "global"}:
+        return "global"
+    return "user_baseline"
+
+
+def _metric_value(log: Any, daily_feature: dict[str, Any] | None, field: str) -> float | None:
+    if daily_feature and field in daily_feature:
+        return _float_value(daily_feature.get(field))
+    attrs = getattr(log, "attrs", None)
+    if isinstance(attrs, dict) and field in attrs:
+        return _float_value(attrs.get(field))
+    return _float_value(getattr(log, field, None))
+
+
+def _profile_threshold(profile: dict[str, Any], feature_name: str) -> float | None:
+    value = profile.get(feature_name)
+    if isinstance(value, dict):
+        for key in ("p99", "p99_value", "p95", "p95_value"):
+            threshold = _float_value(value.get(key))
+            if threshold is not None:
+                return threshold
+    return _float_value(value)
+
+
+def _numeric_severity(actual: float, threshold: float) -> str:
+    if threshold <= 0:
+        return "critical" if actual >= 5 else "high"
+    ratio = actual / threshold
+    if ratio >= 3:
+        return "critical"
+    if ratio >= 2:
+        return "high"
+    return "medium"
+
+
+def _metric_evidence_source(daily_feature: dict[str, Any] | None) -> str:
+    return "daily_feature" if daily_feature else "user_baseline"
+
+
+def _float_value(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value))
+    except ValueError:
+        return None
+
+
+def _display_number(value: float) -> int | float:
+    return int(value) if value.is_integer() else value
