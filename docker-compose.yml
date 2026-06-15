@@ -186,11 +186,11 @@ services:
         "src.main",
         "detect-worker",
         "--interval-seconds",
-        "${ANOMALY_DETECTOR_INTERVAL_SECONDS:-30}",
+        "${ANOMALY_DETECTOR_INTERVAL_SECONDS:-1}",
         "--lookback-minutes",
         "${ANOMALY_DETECTOR_LOOKBACK_MINUTES:-10}",
         "--batch-size",
-        "${ANOMALY_DETECTOR_BATCH_SIZE:-1000}",
+        "${ANOMALY_DETECTOR_BATCH_SIZE:-2000}",
       ]
 
   raw-to-parsed:

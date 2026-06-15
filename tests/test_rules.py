@@ -221,6 +221,68 @@ def test_service_account_anomaly_rule_uses_registered_reason_code() -> None:
     assert service_alert.risk_level in {"medium", "high"}
 
 
+def test_service_account_off_hours_alone_is_not_anomalous() -> None:
+    """【误报控制】服务账号 7x24 运行：仅“非工作时间”或“访问敏感资源”不应判异常。"""
+    log = build_log(
+        1,
+        action="api_call",
+        result="success",
+        user_id="svc-report",
+        account_type="service",
+        src_ip="10.0.0.5",
+        resource="/api/internal/config/export",
+        event_time=datetime(2026, 4, 1, 2, 0, 0),
+        ingest_time=datetime(2026, 4, 1, 2, 0, 0),
+    )
+    # 已知来源（seen_source=True），无攻击标记：服务账号常态行为，不应产出服务账号异常。
+    alerts = RuleEngine().evaluate_log(log, DetectionContext(seen_source=True))
+    assert not [a for a in alerts if "service_account_anomaly" in a.reason_codes]
+
+    # 注入攻击标记或新来源时仍应判异常，保证真实场景不漏报。
+    flagged = build_log(
+        2,
+        action="api_call",
+        result="success",
+        user_id="svc-report",
+        account_type="service",
+        src_ip="203.0.113.9",
+        resource="/api/internal/config/export",
+        risk_tags=["service_account_anomaly"],
+        event_time=datetime(2026, 4, 1, 2, 0, 0),
+        ingest_time=datetime(2026, 4, 1, 2, 0, 0),
+    )
+    flagged_alerts = RuleEngine().evaluate_log(flagged, DetectionContext(seen_source=True))
+    assert [a for a in flagged_alerts if "service_account_anomaly" in a.reason_codes]
+
+
+def test_off_hours_login_suppressed_when_baseline_marks_hour_normal() -> None:
+    """【误报控制】用户有可信 baseline 且该时段属其活跃时段时，非工作时间登录不再报警。"""
+    off_hour_time = datetime(2026, 4, 1, 2, 0, 0)
+    log = build_log(
+        1,
+        action="login",
+        result="success",
+        src_ip="1.1.1.1",
+        resource="/home",
+        user_id="nightshift.user",
+        event_time=off_hour_time,
+        ingest_time=off_hour_time,
+    )
+    # baseline 可用且未给出 outside_active_hours 偏离 → 该用户夜间活跃，抑制刷报。
+    ctx = DetectionContext(seen_source=True, baseline_available=True, baseline_deviations=[])
+    alerts = RuleEngine().evaluate_log(log, ctx)
+    assert not [a for a in alerts if "rare_login_hour" in a.reason_codes]
+
+    # baseline 明确给出 outside_active_hours 偏离时，仍应报警。
+    ctx_dev = DetectionContext(
+        seen_source=True,
+        baseline_available=True,
+        baseline_deviations=[{"deviation_type": "outside_active_hours", "severity": "medium"}],
+    )
+    alerts_dev = RuleEngine().evaluate_log(log, ctx_dev)
+    assert [a for a in alerts_dev if "rare_login_hour" in a.reason_codes]
+
+
 def test_insufficient_history_deviation_does_not_overestimate_new_source_risk() -> None:
     log = build_log(
         1,

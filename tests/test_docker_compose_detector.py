@@ -13,6 +13,8 @@ def test_anomaly_detector_service_runs_on_default_compose_path() -> None:
     assert "profiles:" not in detector_section
     assert "detect-worker" in config
     assert "--interval-seconds" in config
+    assert "${ANOMALY_DETECTOR_INTERVAL_SECONDS:-1}" in detector_section
+    assert "${ANOMALY_DETECTOR_BATCH_SIZE:-2000}" in detector_section
 
 
 def test_flink_runtime_is_part_of_default_compose_path() -> None:

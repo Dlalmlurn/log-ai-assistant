@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from src.detection.rules import DetectionContext, RuleEngine
 from src.schemas import AnomalyEvent, NormalizedLog
 from src.ueba.deviation import (
+    UserContext,
     evaluate_deviations,
     is_seen_source,
     load_user_context,
@@ -79,6 +80,8 @@ class AnomalyDetectorWorker:
         self._seen_anomaly_ids: set[str] = set()
         self._engine = RuleEngine()
         self._batch_seen_sources: set[tuple[str, str, str, str]] = set()
+        # 每轮检测前按用户预取一次持久化上下文，避免逐条日志重复查询 ClickHouse 拖慢吞吐。
+        self._round_contexts: dict[tuple[str, str], UserContext] = {}
 
     def run_once(self) -> DetectionRunSummary:
         started = time.perf_counter()
@@ -101,6 +104,7 @@ class AnomalyDetectorWorker:
         logs = [NormalizedLog.model_validate(item) for item in items]
         logs.sort(key=lambda item: item.event_time)
 
+        self._round_contexts = self._prefetch_contexts(logs)
         anomalies = _dedupe_anomalies(self._detect_logs(logs), self._seen_anomaly_ids)
         if anomalies:
             self.storage.insert_anomalies(anomalies)
@@ -139,18 +143,37 @@ class AnomalyDetectorWorker:
                 self._batch_seen_sources.add(source)
         return anomalies
 
+    def _prefetch_contexts(self, logs: list[NormalizedLog]) -> dict[tuple[str, str], UserContext]:
+        """按 (tenant, user) 去重预取本轮所有用户上下文，每个用户只查一次 ClickHouse。"""
+
+        cache: dict[tuple[str, str], UserContext] = {}
+        for log in logs:
+            if not log.user_id:
+                continue
+            key = (log.tenant_id, log.user_id)
+            if key not in cache:
+                cache[key] = load_user_context(self.storage, log.tenant_id, log.user_id)
+        return cache
+
     def _context_for_log(self, log: NormalizedLog) -> DetectionContext:
-        ctx = load_user_context(self.storage, log.tenant_id, log.user_id)
+        ctx = self._round_contexts.get((log.tenant_id, log.user_id)) if log.user_id else None
+        if ctx is None:
+            ctx = load_user_context(self.storage, log.tenant_id, log.user_id)
         deviations = [d.to_dict() for d in evaluate_deviations(log, ctx)]
+        baseline_available = ctx.baseline is not None
         source = _source_identity(log)
         if not source:
-            return DetectionContext(baseline_deviations=deviations)
+            return DetectionContext(
+                baseline_deviations=deviations,
+                baseline_available=baseline_available,
+            )
 
         _, _, _, source_key = source
         seen = (source in self._batch_seen_sources) or is_seen_source(ctx, source_key)
         return DetectionContext(
             seen_source=seen,
             baseline_deviations=deviations,
+            baseline_available=baseline_available,
         )
 
     def _upsert_seen_sources(self, logs: list[NormalizedLog]) -> None:

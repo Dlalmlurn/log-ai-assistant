@@ -37,6 +37,16 @@ class DetectionContext:
     baseline_deviations: list[dict[str, Any]] = field(default_factory=list)
     maintenance_window: bool = False
     allowlisted_context: bool = False
+    # 该用户是否已有可信持久化 baseline。True 时非工作时间登录以 baseline 偏离为准，
+    # 不再用固定工作时间窗口对每条日志重复报警；False（含无上下文的离线单测）时回退固定窗口。
+    baseline_available: bool = False
+
+    def deviation_types(self) -> set[str]:
+        return {
+            str(item.get("deviation_type"))
+            for item in self.baseline_deviations
+            if item.get("deviation_type")
+        }
 
 
 def _is_sensitive(resource: str | None) -> bool:
@@ -244,7 +254,7 @@ class RuleEngine:
             else:
                 known.add(log.src_ip)
 
-        if ts.hour < settings.work_hour_start or ts.hour >= settings.work_hour_end:
+        if self._should_flag_off_hours(ts, context):
             anomalies.append(
                 self._build_anomaly(
                     log,
@@ -256,6 +266,20 @@ class RuleEngine:
                 )
             )
         return anomalies
+
+    @staticmethod
+    def _should_flag_off_hours(ts: datetime, context: DetectionContext | None) -> bool:
+        """非工作时间登录是否应报警。
+
+        有可信 baseline 时，只在登录时间确实落在该用户活跃时段之外（baseline 给出
+        ``outside_active_hours`` 偏离）才报警，避免对夜班/全天候用户的每条登录刷高频误报；
+        无可信 baseline（含离线单测的空上下文）时，回退到固定工作时间窗口。
+        """
+
+        off_hours = ts.hour < settings.work_hour_start or ts.hour >= settings.work_hour_end
+        if context and context.baseline_available:
+            return "outside_active_hours" in context.deviation_types()
+        return off_hours
 
     def _handle_api_call(
         self,
@@ -490,13 +514,21 @@ def _is_service_account(log: NormalizedLog) -> bool:
 
 
 def _is_service_account_anomalous(log: NormalizedLog, context: DetectionContext) -> bool:
+    """服务账号是否构成异常。
+
+    服务账号天然 7x24 运行并常态访问配置/备份类资源，因此“非工作时间”或“访问敏感资源”
+    单独都不足以判异常，否则会把正常自动化任务刷成高风险。只在出现真正可疑信号时判异常：
+    生成器显式注入的攻击标记，或来自持久化证据判定的新来源。
+    """
+
     if "service_account_anomaly" in log.risk_tags:
         return True
     if context.seen_source is False:
         return True
-    if _is_sensitive(log.resource):
+    # 新来源叠加敏感资源访问，视为服务账号被劫持/凭证外泄的强信号。
+    if "new_source_ip" in context.deviation_types() and _is_sensitive(log.resource):
         return True
-    return log.event_time.hour < settings.work_hour_start or log.event_time.hour >= settings.work_hour_end
+    return False
 
 
 def _host_key(log: NormalizedLog) -> str | None:
