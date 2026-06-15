@@ -309,11 +309,13 @@ p {
   align-items: center;
   gap: 6px;
   width: fit-content;
+  max-width: 100%;
   min-height: 26px;
   padding: 4px 8px;
   border-radius: 999px;
   font-size: 12px;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .pill svg {
@@ -853,7 +855,7 @@ p {
 }
 
 .profile-grid {
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
 }
 
 .profile-card,
@@ -877,8 +879,13 @@ p {
 
 .profile-card-head {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
+}
+
+.profile-card-head > div {
+  min-width: 0;
 }
 
 .profile-card-head h2 {
@@ -894,17 +901,19 @@ p {
 }
 
 .profile-meta span {
+  max-width: 100%;
   padding: 4px 8px;
   border-radius: 999px;
   color: #526575;
   background: #eef4f6;
   font-size: 12px;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .w1h-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -925,9 +934,14 @@ p {
 }
 
 .w1h-card-head svg {
+  flex: 0 0 auto;
   width: 18px;
   height: 18px;
   color: var(--ink-soft, #607286);
+}
+
+.w1h-card-head > div {
+  min-width: 0;
 }
 
 .w1h-card-head h3 {
@@ -938,6 +952,7 @@ p {
 .w1h-card-head span {
   color: var(--ink-soft, #607286);
   font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .w1h-list {
@@ -948,9 +963,10 @@ p {
 
 .w1h-row {
   display: grid;
-  grid-template-columns: minmax(110px, 1fr) minmax(120px, 1.6fr);
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.45fr);
   gap: 8px;
   align-items: baseline;
+  min-width: 0;
 }
 
 .w1h-row dt {
@@ -979,7 +995,7 @@ p {
 
 .profile-sections {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
   gap: 10px;
 }
 
@@ -1388,6 +1404,7 @@ body {
 .pill {
   max-width: 100%;
   line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .tag-list span:not(.muted) {
@@ -1583,6 +1600,11 @@ body {
   .profile-grid,
   .compact-row {
     grid-template-columns: 1fr;
+  }
+
+  .w1h-row {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 }
 
