@@ -1110,12 +1110,7 @@ function AlertDetailPanel({
                   const feature = String(deviation.feature ?? deviation.name ?? "unknown");
                   const actual = String(deviation.actual ?? deviation.value ?? "—");
                   const source = String(deviation.evidence_source ?? "");
-                  const sourceLabel =
-                    source === "user_history"
-                      ? "来自用户历史基线"
-                      : source === "seen_sources"
-                        ? "来自持久化已见来源表"
-                        : source || "未知来源";
+                  const sourceLabel = formatEvidenceSource(source);
                   const sampleDays = deviation.sample_days != null ? Number(deviation.sample_days) : undefined;
                   return (
                     <li key={`${feature}-${actual}`}>
@@ -1264,6 +1259,18 @@ function UserProfilesPage() {
       />
     </section>
   );
+}
+
+function formatEvidenceSource(source: string): string {
+  const labels: Record<string, string> = {
+    user_baseline: "来自用户历史基线",
+    user_history: "来自用户历史基线",
+    daily_feature: "来自日级行为特征",
+    seen_sources: "来自持久化已见来源表",
+    peer_group: "来自同组用户基线",
+    global: "来自全局基线"
+  };
+  return (labels[source] ?? source) || "未知来源";
 }
 
 function ProfileSection({ title, value }: { title: string; value: Record<string, unknown> }) {

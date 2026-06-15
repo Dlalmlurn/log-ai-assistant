@@ -408,15 +408,12 @@ def analyze_alert(
         baseline = _fetch_alert_baseline(storage, alert)
         related_logs = _fetch_related_logs(storage, alert)
         anomaly_event = AnomalyEvent.model_validate(alert)
-        _evidence = anomaly_event.evidence or {}
-        window_stats: dict[str, Any] = _evidence.get("window_stats") or {}
-        if not window_stats and anomaly_event.related_event_ids:
-            try:
-                window_stats = storage.security_log_quality_stats(
-                    anomaly_event.related_event_ids
-                )
-            except Exception:
-                window_stats = {}
+        window_stats = _build_ai_window_stats(
+            evidence=anomaly_event.evidence,
+            related_logs=related_logs,
+            related_event_ids=anomaly_event.related_event_ids,
+            storage=storage,
+        )
         report = analyzer.analyze(
             event=anomaly_event,
             baseline=baseline,
@@ -910,6 +907,90 @@ def _is_ai_judgement_candidate(alert: dict[str, Any]) -> bool:
     return risk_level in AI_CANDIDATE_RISK_LEVELS or ai_status == "pending"
 
 
+def _build_ai_window_stats(
+    *,
+    evidence: dict[str, Any],
+    related_logs: list[dict[str, Any]],
+    related_event_ids: list[str],
+    storage: ClickHouseStorage,
+) -> dict[str, Any]:
+    evidence_stats = evidence.get("window_stats") if isinstance(evidence, dict) else None
+    if isinstance(evidence_stats, dict) and evidence_stats:
+        return dict(evidence_stats)
+
+    derived_stats = _derive_related_log_window_stats(related_logs)
+    if derived_stats:
+        return derived_stats
+
+    quality_stats = getattr(storage, "security_log_quality_stats", None)
+    if callable(quality_stats) and related_event_ids:
+        try:
+            stats = quality_stats(related_event_ids)
+        except Exception:
+            return {}
+        return stats if isinstance(stats, dict) else {}
+
+    return {}
+
+
+def _derive_related_log_window_stats(related_logs: list[dict[str, Any]]) -> dict[str, Any]:
+    if not related_logs:
+        return {}
+
+    result_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    src_ips: set[str] = set()
+    times: list[datetime] = []
+    failed_login_count = 0
+    successful_login_count = 0
+    denied_count = 0
+    sensitive_access_count = 0
+
+    for log in related_logs:
+        action = str(log.get("action") or "").lower()
+        result = str(log.get("result") or "").lower()
+        resource = str(log.get("resource") or log.get("object_id") or "").lower()
+        risk_tags = _string_list(log.get("risk_tags"))
+
+        if action:
+            action_counts[action] = action_counts.get(action, 0) + 1
+        if result:
+            result_counts[result] = result_counts.get(result, 0) + 1
+        src_ip = log.get("src_ip")
+        if src_ip:
+            src_ips.add(str(src_ip))
+        event_time = _parse_datetime_value(log.get("event_time"))
+        if event_time is not None:
+            times.append(event_time)
+
+        if "login" in action and result in {"fail", "failed", "denied", "error"}:
+            failed_login_count += 1
+        if "login" in action and result == "success":
+            successful_login_count += 1
+        if result == "denied":
+            denied_count += 1
+        if "sensitive_resource" in risk_tags or any(marker in resource for marker in ("admin", "export", "secret", "sensitive")):
+            sensitive_access_count += 1
+
+    stats: dict[str, Any] = {
+        "related_log_count": len(related_logs),
+        "failed_login_count": failed_login_count,
+        "successful_login_count": successful_login_count,
+        "denied_count": denied_count,
+        "sensitive_access_count": sensitive_access_count,
+        "unique_src_ip_count": len(src_ips),
+        "action_counts": action_counts,
+        "result_counts": result_counts,
+    }
+    if times:
+        start = min(times)
+        end = max(times)
+        stats["window_start"] = start.isoformat()
+        stats["window_end"] = end.isoformat()
+        stats["window_seconds"] = max(0, int((end - start).total_seconds()))
+    return stats
+
+
 def _store_ai_feedback_suggestions(
     storage: ClickHouseStorage,
     report: AIJudgement,
@@ -1140,6 +1221,17 @@ def _event_hour(value: Any) -> int | None:
         try:
             normalized = value.replace("Z", "+00:00")
             return datetime.fromisoformat(normalized).hour
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_datetime_value(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             return None
     return None
