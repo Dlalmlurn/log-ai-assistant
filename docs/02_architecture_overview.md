@@ -43,8 +43,27 @@ docker compose up --build
 | FastAPI | 封装查询、分析、状态、AI 研判和反馈接口。 | 不把数据库细节暴露给前端。 |
 | React | 提供安全运营工作台。 | 不生成核心业务数据，不直连底层组件。 |
 | AI 服务 | 对高可疑事件进行证据化研判，并产出反馈建议。 | 不分析全量日志，不替代规则和 baseline。 |
+| 运营控制面 | 调度 baseline、日报、质量对账和场景评测，记录运行状态并驱动通知 outbox。 | 不复制领域计算，不修改异常事实。 |
 
 ## 数据路径
+
+### 运营任务路径
+
+```text
+operations-runner
+  -> data watermark
+  -> daily features / baseline / quality / report
+  -> task runs and acceptance reports
+  -> FastAPI
+  -> React
+
+AnomalyEvent high/critical
+  -> notification outbox
+  -> notification worker
+  -> webhook adapter
+```
+
+运营控制面只负责编排和记录。baseline、质量、日报和场景评测仍调用各自领域模块，通知失败不回写或覆盖 `AnomalyEvent`。
 
 ### 原始日志路径
 

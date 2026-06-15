@@ -26,6 +26,7 @@ Elasticsearch 不再作为当前目标形态的一部分。
 - `docs/07_ai_judgement_feedback_spec.md`
 - `docs/09_data_generation_and_scenarios.md`
 - `docs/10_final_quality_criteria.md`
+- `docs/11_operations_and_acceptance_spec.md`
 
 ## 文档索引
 

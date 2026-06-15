@@ -34,6 +34,7 @@ ADR 不是普通备忘录，也不是任务清单。它记录的是会长期影�
 | `ADR-008-generated-priors-are-not-baselines.md` | 生成器画像不等于系统行为 baseline。 |
 | `ADR-009-docker-compose-runtime-environment.md` | Docker Compose 作为正式运行环境基准。 |
 | `ADR-010-periodic-baselines-and-reviewed-overrides.md` | 周期 baseline 与审核后生效的覆盖层。 |
+| `ADR-011-operations-control-plane-and-measurable-acceptance.md` | 统一周期任务、质量门禁、场景评测和高危通知的运营控制面。 |
 
 ## 追加规则
 
