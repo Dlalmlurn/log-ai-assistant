@@ -370,6 +370,15 @@ SEEN_SOURCES_COLUMNS: tuple[str, ...] = (
     "updated_at",
 )
 
+REASON_CODE_FEEDBACK_STATS_COLUMNS: tuple[str, ...] = (
+    "tenant_id",
+    "user_id",
+    "reason_codes_combo",
+    "fp_count",
+    "confirmed_count",
+    "last_updated",
+)
+
 DAILY_FEATURES_JSON_FIELDS: set[str] = {"profile_metrics", "common_src_ips", "common_ip_prefixes", "common_hosts", "common_actions"}
 AI_JUDGEMENT_JSON_FIELDS = {"feedback_suggestions", "raw_response"}
 BASELINE_OVERRIDE_JSON_FIELDS = {"override_value"}
@@ -648,6 +657,16 @@ class ClickHouseStorage:
             WHERE event_id = {event_id:String}
             """,
             parameters={"event_id": event_id, "ai_status": ai_status},
+        )
+
+    def update_anomaly_status(self, event_id: str, status: str) -> None:
+        self.client.command(
+            """
+            ALTER TABLE anomaly_events
+            UPDATE status = {status:String}
+            WHERE event_id = {event_id:String}
+            """,
+            parameters={"event_id": event_id, "status": status},
         )
 
     def aggregate_anomalies(
@@ -1747,6 +1766,69 @@ class ClickHouseStorage:
             parameters["source_key"] = source_key
         sql = f"SELECT * FROM user_seen_sources {_where(filters)} LIMIT {{limit:UInt64}}"
         return self._select_dicts(sql, parameters | {"limit": limit})
+
+    def upsert_reason_code_feedback_stats(
+        self,
+        tenant_id: str,
+        user_id: str,
+        reason_codes_combo: str,
+        *,
+        fp_delta: int = 0,
+        confirmed_delta: int = 0,
+    ) -> None:
+        """Increment fp_count or confirmed_count for a reason-codes combo."""
+        existing = self._select_dicts(
+            """
+            SELECT fp_count, confirmed_count
+            FROM reason_code_feedback_stats FINAL
+            WHERE tenant_id = {t:String} AND user_id = {u:String}
+              AND reason_codes_combo = {combo:String}
+            LIMIT 1
+            """,
+            {"t": tenant_id, "u": user_id, "combo": reason_codes_combo},
+        )
+        if existing:
+            row_val = existing[0]
+            new_fp = int(row_val.get("fp_count", 0)) + fp_delta
+            new_confirmed = int(row_val.get("confirmed_count", 0)) + confirmed_delta
+        else:
+            new_fp = max(0, fp_delta)
+            new_confirmed = max(0, confirmed_delta)
+
+        self.client.insert(
+            "reason_code_feedback_stats",
+            [[tenant_id, user_id, reason_codes_combo, new_fp, new_confirmed, datetime.now(timezone.utc)]],
+            column_names=list(REASON_CODE_FEEDBACK_STATS_COLUMNS),
+        )
+
+    def get_user_reason_feedback_stats(
+        self,
+        tenant_id: str = "default",
+        user_id: str | None = None,
+    ) -> dict[str, dict[str, int]]:
+        filters: list[str] = ["tenant_id = {t:String}"]
+        parameters: dict[str, Any] = {"t": tenant_id}
+        if user_id:
+            filters.append("user_id = {u:String}")
+            parameters["u"] = user_id
+        rows = self._select_dicts(
+            f"""
+            SELECT user_id, reason_codes_combo, fp_count, confirmed_count
+            FROM reason_code_feedback_stats FINAL
+            {_where(filters)}
+            """,
+            parameters,
+        )
+        result: dict[str, dict[str, int]] = {}
+        for r in rows:
+            uid = str(r.get("user_id") or "")
+            combo = str(r.get("reason_codes_combo") or "")
+            key = f"{uid}:{combo}"
+            result[key] = {
+                "fp_count": int(r.get("fp_count") or 0),
+                "confirmed_count": int(r.get("confirmed_count") or 0),
+            }
+        return result
 
     def list_daily_reports(
         self,

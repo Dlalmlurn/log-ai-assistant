@@ -58,12 +58,46 @@ def _is_sensitive(resource: str | None) -> bool:
     return any(k in lowered for k in SENSITIVE_KEYWORDS)
 
 
+def _compute_feedback_adjustment(
+    feedback_stats: dict[str, dict[str, int]],
+    user_id: str | None,
+    reason_codes_combo: str,
+) -> int:
+    """根据历史反馈统计计算反馈调节得分。
+
+    FPR >= 0.6 → -10 (最高惩罚)
+    FPR >= 0.3 → -5  (中等惩罚)
+    有确认记录且 FPR < 0.3 → +5 (信任加分)
+    """
+    if not user_id or not feedback_stats:
+        return 0
+    key = f"{user_id}:{reason_codes_combo}"
+    stats = feedback_stats.get(key)
+    if not stats:
+        return 0
+    fp = stats.get("fp_count", 0)
+    confirmed = stats.get("confirmed_count", 0)
+    total = fp + confirmed
+    if total == 0:
+        return 0
+    fpr = fp / total
+    if fpr >= 0.6:
+        return -10
+    if fpr >= 0.3:
+        return -5
+    if confirmed > 0:
+        return 5
+    return 0
+
+
 class RuleEngine:
     """基于内存滑动窗口的规则引擎。"""
 
     def __init__(self, builder: AnomalyEventBuilder | None = None):
         # builder 专门负责把规则命中结果组装成 AnomalyEvent。
         self.builder = builder or AnomalyEventBuilder()
+        # 每轮检测前由 worker 注入，key="user_id:reason_codes_combo"
+        self.feedback_stats: dict[str, dict[str, int]] = {}
 
         # 下面这些 dict/deque 是规则引擎的短期记忆，用来统计一段时间内的行为次数。
         self.ip_failed_logins: dict[str, Deque[datetime]] = defaultdict(deque)
@@ -459,13 +493,19 @@ class RuleEngine:
         mitigations = _mitigation_reason_codes(log, context)
         if mitigations:
             resolved_evidence["risk_mitigations"] = mitigations
+        overrides = dict(risk_component_overrides or {})
+        if "feedback_adjustment" not in overrides:
+            combo = ",".join(sorted(resolved_reason_codes))
+            adj = _compute_feedback_adjustment(self.feedback_stats, log.user_id, combo)
+            if adj != 0:
+                overrides["feedback_adjustment"] = adj
         return self.builder.build(
             log=log,
             rule_hits=[rule],
             reason_codes=resolved_reason_codes,
             evidence=resolved_evidence,
             related_event_ids=related_event_ids,
-            risk_component_overrides=risk_component_overrides or {},
+            risk_component_overrides=overrides,
             baseline_deviations=baseline_deviations,
             event_id_seed=seed,
         )

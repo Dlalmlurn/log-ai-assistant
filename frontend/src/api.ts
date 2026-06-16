@@ -70,6 +70,27 @@ export async function analyzeAlert(alertId: string, signal?: AbortSignal): Promi
   });
 }
 
+export async function flagFalsePositive(alertId: string, signal?: AbortSignal): Promise<{ status: string; event_id: string }> {
+  return apiFetch<{ status: string; event_id: string }>(`/api/v1/anomalies/${encodeURIComponent(alertId)}/flag-false-positive`, {
+    method: "POST",
+    signal
+  });
+}
+
+export async function confirmFalsePositive(alertId: string, signal?: AbortSignal): Promise<{ status: string; event_id: string }> {
+  return apiFetch<{ status: string; event_id: string }>(`/api/v1/anomalies/${encodeURIComponent(alertId)}/confirm-false-positive`, {
+    method: "POST",
+    signal
+  });
+}
+
+export async function rejectFalsePositive(alertId: string, signal?: AbortSignal): Promise<{ status: string; event_id: string }> {
+  return apiFetch<{ status: string; event_id: string }>(`/api/v1/anomalies/${encodeURIComponent(alertId)}/reject-false-positive`, {
+    method: "POST",
+    signal
+  });
+}
+
 export async function fetchBaselines(
   query: PaginationQuery,
   signal?: AbortSignal

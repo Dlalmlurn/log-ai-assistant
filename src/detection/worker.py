@@ -54,6 +54,13 @@ class DetectionStorage(Protocol):
     def upsert_user_seen_sources(self, sources: list[dict[str, Any]]) -> None:
         ...
 
+    def get_user_reason_feedback_stats(
+        self,
+        tenant_id: str = "default",
+        user_id: str | None = None,
+    ) -> dict[str, dict[str, int]]:
+        ...
+
 
 @dataclass(frozen=True)
 class DetectionRunSummary:
@@ -111,6 +118,10 @@ class AnomalyDetectorWorker:
         logs.sort(key=lambda item: item.event_time)
 
         self._round_contexts = self._prefetch_contexts(logs)
+        try:
+            self._engine.feedback_stats = self.storage.get_user_reason_feedback_stats()
+        except Exception:
+            self._engine.feedback_stats = {}
         anomalies = _dedupe_anomalies(self._detect_logs(logs), self._seen_anomaly_ids)
         if anomalies:
             self.storage.insert_anomalies(anomalies)

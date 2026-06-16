@@ -27,14 +27,16 @@ import {
 import {
   analyzeAlert,
   ApiRequestError,
+  confirmFalsePositive,
+  rejectFalsePositive,
   createBaselineOverride,
   createDailyReport,
-  createFeedback,
   dailyReportMarkdownUrl,
   fetchAcceptanceReport,
   fetchAcceptanceReports,
   fetchAIReports,
   fetchAlertDetail,
+  flagFalsePositive,
   fetchAlerts,
   fetchBaselines,
   fetchBaselineOverrides,
@@ -1180,48 +1182,21 @@ function AlertDetailPanel({
   onRefresh: () => void;
 }) {
   const detail = state.data;
-  const [actionState, setActionState] = useState<{ loading: boolean; message: string | null; error: string | null }>({
+  const [flagState, setFlagState] = useState<{ loading: boolean; message: string | null; error: string | null }>({
     loading: false,
     message: null,
     error: null
   });
 
-  const runAIJudgement = () => {
-    if (!selectedAlertId) {
-      return;
-    }
-    setActionState({ loading: true, message: null, error: null });
-    analyzeAlert(selectedAlertId)
-      .then((report) => {
-        setActionState({
-          loading: false,
-          message: `AI 研判已保存（${report.is_mock ? "模拟结果" : report.model_name}）。`,
-          error: null
-        });
+  const handleFlagFalsePositive = () => {
+    if (!selectedAlertId) return;
+    setFlagState({ loading: true, message: null, error: null });
+    flagFalsePositive(selectedAlertId)
+      .then(() => {
+        setFlagState({ loading: false, message: "已标记为待审核，请在 AI 研判页面进一步处理。", error: null });
         onRefresh();
       })
-      .catch((error: unknown) => setActionState({ loading: false, message: null, error: formatError(error) }));
-  };
-
-  const submitFalsePositiveFeedback = () => {
-    if (!detail) {
-      return;
-    }
-    setActionState({ loading: true, message: null, error: null });
-    createFeedback({
-      event_id: detail.anomaly.event_id,
-      tenant_id: detail.anomaly.tenant_id,
-      user_id: detail.anomaly.user_id,
-      judgement_id: typeof detail.ai_judgement.judgement_id === "string" ? detail.ai_judgement.judgement_id : undefined,
-      feedback_type: "false_positive",
-      target_component: "scoring",
-      suggestion: "分析员将此异常标记为误报复核。",
-      confidence: 1
-    })
-      .then((feedback) => {
-        setActionState({ loading: false, message: `反馈已提交，当前状态：${formatReviewStatus(feedback.review_status)}。`, error: null });
-      })
-      .catch((error: unknown) => setActionState({ loading: false, message: null, error: formatError(error) }));
+      .catch((error: unknown) => setFlagState({ loading: false, message: null, error: formatError(error) }));
   };
 
   if (!selectedAlertId) {
@@ -1243,8 +1218,8 @@ function AlertDetailPanel({
       </div>
 
       {state.error ? <ErrorBanner message={state.error} /> : null}
-      {actionState.error ? <ErrorBanner message={actionState.error} /> : null}
-      {actionState.message ? <div className="success-banner">{actionState.message}</div> : null}
+      {flagState.error ? <ErrorBanner message={flagState.error} /> : null}
+      {flagState.message ? <div className="success-banner">{flagState.message}</div> : null}
       {state.loading && !detail ? <TableSkeleton /> : null}
 
       {detail ? (
@@ -1255,11 +1230,7 @@ function AlertDetailPanel({
               <span>{formatAIStatus(detail.anomaly.ai_status)}</span>
             </div>
             <div className="inline-actions">
-              <button className="icon-button primary" type="button" onClick={runAIJudgement} disabled={actionState.loading}>
-                <Brain aria-hidden="true" />
-                分析
-              </button>
-              <button className="icon-button" type="button" onClick={submitFalsePositiveFeedback} disabled={actionState.loading}>
+              <button className="icon-button" type="button" onClick={handleFlagFalsePositive} disabled={flagState.loading}>
                 <CheckCircle2 aria-hidden="true" />
                 标记误报
               </button>
@@ -1492,7 +1463,7 @@ function UserProfilesPage() {
     setAction({ loading: true, message: null, error: null });
     rebuildBaselines()
       .then((result) => {
-        setAction({ loading: false, message: `周期基线重建完成，共生成 ${result.rebuilt_count} 组画像。`, error: null });
+        setAction({ loading: false, message: `周期基线重建完成，共为 ${result.rebuilt_count} 位用户生成画像。`, error: null });
         refreshAll();
       })
       .catch((error: unknown) => setAction({ loading: false, message: null, error: formatError(error) }));
@@ -1872,74 +1843,191 @@ function roundNumber(value: number): number {
 }
 
 function AIJudgementPage() {
-  const [query, setQuery] = useState({ limit: 25, offset: 0 });
-  const [state, setState] = useState<LoadState<{ items: AIJudgement[]; total: number }>>({
-    data: null,
-    loading: true,
-    error: null,
-    updatedAt: null
+  const [pendingReviewQuery] = useState({ limit: 100, offset: 0, status: "pending_review" });
+  const [pending, setPending] = useState<LoadState<AnomalyEvent[]>>({
+    data: null, loading: true, error: null, updatedAt: null
   });
+  const [processed, setProcessed] = useState<LoadState<AnomalyEvent[]>>({
+    data: null, loading: true, error: null, updatedAt: null
+  });
+  const [analysisResults, setAnalysisResults] = useState<Map<string, AIJudgement>>(new Map());
+  const [analyzingSet, setAnalyzingSet] = useState<Set<string>>(new Set());
 
-  const load = useCallback((activeQuery = query, signal?: AbortSignal) => {
-    setState((current) => ({ ...current, loading: true, error: null }));
-    fetchAIReports(activeQuery, signal)
-      .then((data) => setState({ data: { items: data.items, total: data.total }, loading: false, error: null, updatedAt: new Date() }))
+  const loadPending = useCallback((signal?: AbortSignal) => {
+    setPending((current) => ({ ...current, loading: true, error: null }));
+    fetchAlerts(pendingReviewQuery, signal)
+      .then((data) => setPending({ data: data.items, loading: false, error: null, updatedAt: new Date() }))
       .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === "AbortError") {
-          return;
-        }
-        setState((current) => ({ ...current, loading: false, error: formatError(error) }));
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setPending((current) => ({ ...current, loading: false, error: formatError(error) }));
       });
-  }, [query]);
+  }, [pendingReviewQuery]);
+
+  const loadProcessed = useCallback((signal?: AbortSignal) => {
+    setProcessed((current) => ({ ...current, loading: true, error: null }));
+    Promise.all([
+      fetchAlerts({ limit: 100, offset: 0, status: "false_positive" }, signal),
+      fetchAlerts({ limit: 100, offset: 0, status: "rejected" }, signal),
+    ])
+      .then(([fp, rej]) => {
+        const all = [...fp.items, ...rej.items].sort(
+          (a, b) => new Date(b.event_time).getTime() - new Date(a.event_time).getTime()
+        );
+        setProcessed({ data: all, loading: false, error: null, updatedAt: new Date() });
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setProcessed((current) => ({ ...current, loading: false, error: formatError(error) }));
+      });
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
-    load(query, controller.signal);
+    loadPending(controller.signal);
+    loadProcessed(controller.signal);
     return () => controller.abort();
-  }, [load, query]);
+  }, [loadPending, loadProcessed]);
+
+  const runAnalysis = (alertId: string) => {
+    if (analyzingSet.has(alertId)) return;
+    setAnalyzingSet((prev) => new Set(prev).add(alertId));
+    analyzeAlert(alertId)
+      .then((report) => {
+        setAnalysisResults((prev) => new Map(prev).set(alertId, report));
+      })
+      .catch((error: unknown) => { alert(formatError(error)); })
+      .finally(() => {
+        setAnalyzingSet((prev) => { const next = new Set(prev); next.delete(alertId); return next; });
+      });
+  };
+
+  const handleConfirmFalsePositive = (alertId: string) => {
+    if (!window.confirm("确认将此项标记为误报？")) return;
+    confirmFalsePositive(alertId)
+      .then(() => {
+        setPending((current) => {
+          if (!current.data) return current;
+          return { ...current, data: current.data.filter((a) => a.event_id !== alertId) };
+        });
+        loadProcessed();
+      })
+      .catch((error: unknown) => { alert(formatError(error)); });
+  };
+
+  const handleReject = (alertId: string) => {
+    if (!window.confirm("驳回此项误报标记，返回异常列表？")) return;
+    rejectFalsePositive(alertId)
+      .then(() => {
+        setPending((current) => {
+          if (!current.data) return current;
+          return { ...current, data: current.data.filter((a) => a.event_id !== alertId) };
+        });
+        loadProcessed();
+      })
+      .catch((error: unknown) => { alert(formatError(error)); });
+  };
 
   return (
     <section className="page">
       <PageHeader
         kicker="AI 研判"
         title="AI 研判"
-        description="展示已保存的 AI 异常研判记录，并明确标记模拟结果。"
+        description="审核已标记为待复核的异常事件，通过 AI 辅助分析后确认误报或驳回。"
         action={
-          <button className="icon-button primary" type="button" onClick={() => load()} disabled={state.loading}>
-            <RefreshCcw aria-hidden="true" className={state.loading ? "spin" : ""} />
+          <button className="icon-button primary" type="button" onClick={() => { loadPending(); loadProcessed(); }} disabled={pending.loading}>
+            <RefreshCcw aria-hidden="true" className={pending.loading ? "spin" : ""} />
             刷新
           </button>
         }
       />
-      {state.error ? <ErrorBanner message={state.error} /> : null}
-      <div className="compact-list">
-        {state.data?.items.map((item) => (
-          <article className="judgement-card" key={item.judgement_id}>
-            <div className="profile-card-head">
-              <div>
-                <span className="eyebrow">{item.event_id}</span>
-                <h2>{item.attack_type || "未知攻击"}</h2>
-              </div>
-              <span className={`risk-chip ${riskTone(item.risk_level)}`}>{formatRiskLevel(item.risk_level)}</span>
-            </div>
-            <p>{item.judgement}</p>
-            <div className="tag-list">
-              <span>{item.model_name}</span>
-              {item.is_mock && <span className="mock-badge" aria-label="模拟结果">模拟结果</span>}
-              <span>置信度 {item.confidence}</span>
-            </div>
-            <JsonBlock value={{ key_reasons: item.key_reasons, recommended_actions: item.recommended_actions, feedback_suggestions: item.feedback_suggestions }} />
-          </article>
-        ))}
-        {!state.loading && state.data?.items.length === 0 ? <EmptyState title="暂无 AI 研判" detail="异常分析写入 ai_judgements 后，研判记录会在这里展示。" /> : null}
+
+      {pending.error ? <ErrorBanner message={pending.error} /> : null}
+      {processed.error ? <ErrorBanner message={processed.error} /> : null}
+
+      <div className="split-panels">
+        {/* Left panel: pending review */}
+        <section className="page-panel">
+          <div className="section-header">
+            <h3>待处理 ({pending.data?.length ?? 0})</h3>
+          </div>
+          {pending.loading ? <TableSkeleton /> : null}
+          <div className="compact-list">
+            {pending.data?.map((alert) => {
+              const report = analysisResults.get(alert.event_id);
+              return (
+                <article className="judgement-card" key={alert.event_id}>
+                  <div className="profile-card-head">
+                    <div>
+                      <span className="eyebrow">{alert.event_id}</span>
+                      <h2>{alert.attack_type || "未知攻击"}</h2>
+                    </div>
+                    <span className={`risk-chip ${riskTone(alert.risk_level)}`}>{formatRiskLevel(alert.risk_level)}</span>
+                  </div>
+                  <div className="tag-list">
+                    <span>{alert.user_id || "未知用户"}</span>
+                    <span>{alert.src_ip || "未知IP"}</span>
+                    <span>分数 {alert.risk_score}</span>
+                  </div>
+                  <JsonBlock value={{ reason_codes: alert.reason_codes, evidence: alert.evidence }} />
+                  {report ? (
+                    <div className="ai-result-inline">
+                      <p>{report.judgement}</p>
+                      <div className="tag-list">
+                        <span>{report.model_name}</span>
+                        <span>置信度 {report.confidence}</span>
+                      </div>
+                    </div>
+                  ) : null}
+                  <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+                    <button className="icon-button primary" type="button" onClick={() => runAnalysis(alert.event_id)} disabled={analyzingSet.has(alert.event_id)}>
+                      <Brain aria-hidden="true" className={analyzingSet.has(alert.event_id) ? "spin" : ""} />
+                      {analyzingSet.has(alert.event_id) ? "分析中…" : report ? "重新分析" : "AI 分析"}
+                    </button>
+                    <button className="icon-button" type="button" onClick={() => handleConfirmFalsePositive(alert.event_id)}>
+                      <CheckCircle2 aria-hidden="true" />
+                      确认误报
+                    </button>
+                    <button className="icon-button" type="button" onClick={() => handleReject(alert.event_id)}>
+                      <XCircle aria-hidden="true" />
+                      驳回
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+            {!pending.loading && pending.data?.length === 0 ? <EmptyState title="暂无待处理异常" detail="请在异常事件页面标记误报后在此审核。" /> : null}
+          </div>
+        </section>
+
+        {/* Right panel: processed */}
+        <section className="page-panel">
+          <div className="section-header">
+            <h3>已处理 ({processed.data?.length ?? 0})</h3>
+          </div>
+          {processed.loading ? <TableSkeleton /> : null}
+          <div className="compact-list">
+            {processed.data?.map((alert) => (
+              <article className="judgement-card processed" key={alert.event_id}>
+                <div className="profile-card-head">
+                  <div>
+                    <span className="eyebrow">{alert.event_id}</span>
+                    <h2>{alert.attack_type || "未知攻击"}</h2>
+                  </div>
+                  <span className={`risk-chip ${alert.status === "false_positive" ? "ok" : ""}`}>
+                    {alert.status === "false_positive" ? "已确认误报" : "已驳回"}
+                  </span>
+                </div>
+                <div className="tag-list">
+                  <span>{alert.user_id || "未知用户"}</span>
+                  <span>{alert.src_ip || "未知IP"}</span>
+                  <span>分数 {alert.risk_score}</span>
+                </div>
+              </article>
+            ))}
+            {!processed.loading && processed.data?.length === 0 ? <EmptyState title="暂无已处理记录" detail="确认误报或驳回后将出现在此处。" /> : null}
+          </div>
+        </section>
       </div>
-      <PaginationControls
-        limit={query.limit}
-        offset={query.offset}
-        total={state.data?.total ?? 0}
-        onPrevious={() => setQuery((current) => ({ ...current, offset: Math.max(0, current.offset - current.limit) }))}
-        onNext={() => setQuery((current) => ({ ...current, offset: current.offset + current.limit }))}
-      />
     </section>
   );
 }

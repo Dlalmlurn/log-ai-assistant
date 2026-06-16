@@ -10,7 +10,7 @@ RiskLevel = Literal["low", "medium", "high", "critical"]
 SourceType = Literal["vpn", "oa", "api", "system", "file", "database", "security_device"]
 LogResult = Literal["success", "fail", "denied", "error"]
 AIStatus = Literal["not_required", "pending", "analyzed", "failed"]
-AnomalyStatus = Literal["new", "investigating", "closed", "false_positive"]
+AnomalyStatus = Literal["new", "investigating", "closed", "false_positive", "pending_review", "rejected"]
 FallbackLevel = Literal["none", "peer_group", "department", "global"]
 FeedbackType = Literal[
     "rule_weight",

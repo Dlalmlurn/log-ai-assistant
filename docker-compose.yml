@@ -113,7 +113,7 @@ services:
       context: .
       dockerfile: docker/flink-python.Dockerfile
       args:
-        FLINK_BASE_IMAGE: ${FLINK_IMAGE:-flink:1.18.1}
+        FLINK_BASE_IMAGE: ${FLINK_IMAGE:-flink:1.18.1-java11}
     image: log-ai-assistant-flink-python
     container_name: flink-jobmanager
     command: jobmanager

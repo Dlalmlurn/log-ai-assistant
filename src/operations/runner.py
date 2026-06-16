@@ -296,10 +296,11 @@ class OperationsRunner:
         baselines = build_and_store_baselines(self.storage)
         if not baselines:
             raise TaskNeedsReview("baseline_training_data_missing", "no daily features were available for baseline training")
+        unique_users = len({(item.tenant_id, item.user_id) for item in baselines})
         return {
             "table": "ueba_user_baseline",
             "baseline_date": target_date.isoformat(),
-            "row_count": len(baselines),
+            "row_count": unique_users,
             "model_versions": sorted({item.model_version for item in baselines}),
         }
 
