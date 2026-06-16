@@ -4,6 +4,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INIT_SQL = PROJECT_ROOT / "sql" / "clickhouse" / "01_init.sql"
 ADR010_MIGRATION_SQL = PROJECT_ROOT / "sql" / "clickhouse" / "02_adr010_migration.sql"
+SCORING_MIGRATION_SQL = PROJECT_ROOT / "sql" / "clickhouse" / "04_scoring_and_risk_migration.sql"
+COMPOSE_YML = PROJECT_ROOT / "docker-compose.yml"
 
 
 def test_clickhouse_init_sql_defines_remaining_p0_tables() -> None:
@@ -26,6 +28,7 @@ def test_clickhouse_init_sql_defines_remaining_p0_tables() -> None:
     assert "period_key String DEFAULT 'all'" in sql
     assert "reviewed_by String DEFAULT ''" in sql
     assert "applied_override_id String DEFAULT ''" in sql
+    assert "scoring_version String DEFAULT ''" in sql
 
 
 def test_clickhouse_init_sql_wires_parsed_logs_kafka_sink() -> None:
@@ -54,3 +57,11 @@ def test_adr010_migration_is_idempotent_for_existing_clickhouse_volumes() -> Non
     assert "CREATE TABLE IF NOT EXISTS log_ai.ueba_baseline_overrides" in sql
     assert "ADD COLUMN IF NOT EXISTS reviewed_by" in sql
     assert "ADD COLUMN IF NOT EXISTS applied_override_id" in sql
+
+
+def test_scoring_migration_is_idempotent_and_wired_into_compose() -> None:
+    sql = SCORING_MIGRATION_SQL.read_text(encoding="utf-8")
+    compose = COMPOSE_YML.read_text(encoding="utf-8")
+
+    assert "ADD COLUMN IF NOT EXISTS scoring_version" in sql
+    assert "04_scoring_and_risk_migration.sql" in compose

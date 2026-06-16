@@ -82,6 +82,7 @@ services:
     volumes:
       - ./sql/clickhouse/02_adr010_migration.sql:/migration/02_adr010_migration.sql:ro
       - ./sql/clickhouse/03_adr011_migration.sql:/migration/03_adr011_migration.sql:ro
+      - ./sql/clickhouse/04_scoring_and_risk_migration.sql:/migration/04_scoring_and_risk_migration.sql:ro
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >
@@ -98,7 +99,14 @@ services:
         --user "$$CLICKHOUSE_USER"
         --password "$$CLICKHOUSE_PASSWORD"
         --multiquery
-        < /migration/03_adr011_migration.sql
+        < /migration/03_adr011_migration.sql &&
+        clickhouse-client
+        --host clickhouse
+        --database "$$CLICKHOUSE_DATABASE"
+        --user "$$CLICKHOUSE_USER"
+        --password "$$CLICKHOUSE_PASSWORD"
+        --multiquery
+        < /migration/04_scoring_and_risk_migration.sql
 
   flink-jobmanager:
     build:
@@ -230,6 +238,7 @@ services:
         "${ANOMALY_DETECTOR_LOOKBACK_MINUTES:-10}",
         "--batch-size",
         "${ANOMALY_DETECTOR_BATCH_SIZE:-2000}",
+        "--recover-state-on-start",
       ]
 
   operations-runner:

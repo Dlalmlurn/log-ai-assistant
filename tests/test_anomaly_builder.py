@@ -50,10 +50,11 @@ def test_new_source_ip_builds_medium_account_takeover_event() -> None:
 
     assert event.attack_type == "account_takeover"
     assert event.risk_level == "medium"
-    assert event.risk_score == 45
+    assert event.risk_score == 35
+    assert event.scoring_version == "risk-scoring-v1"
     assert set(event.risk_components) == set(RISK_COMPONENT_KEYS)
-    assert event.risk_components["rule_strength"] == 35
-    assert event.risk_components["baseline_deviation"] == 10
+    assert event.risk_components["rule_strength"] == 20
+    assert event.risk_components["baseline_deviation"] == 15
     assert event.ai_status == "not_required"
 
 
@@ -90,7 +91,7 @@ def test_correlated_sensitive_access_is_critical_and_keeps_related_ids() -> None
 
     assert event.attack_type == "account_takeover"
     assert event.risk_level == "critical"
-    assert event.risk_score == 100
+    assert event.risk_score == 80
     assert event.related_event_ids == ["evt-sensitive", "evt-login"]
     assert event.ai_status == "pending"
 
@@ -118,7 +119,7 @@ def test_baseline_deviations_are_preserved_and_increase_baseline_component() -> 
 
     assert event.baseline_deviations == deviations
     assert event.risk_components["baseline_deviation"] == 25
-    assert event.risk_score == 60
+    assert event.risk_score == 45
 
 
 def test_event_id_seed_generates_stable_event_id() -> None:

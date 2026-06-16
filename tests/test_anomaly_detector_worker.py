@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
+from src.config import settings
 from src.detection.worker import AnomalyDetectorWorker
 from src.schemas import AnomalyEvent, NormalizedLog
 
@@ -51,12 +52,14 @@ class FakeStorage:
     def list_logs(self, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
         self.list_calls.append(kwargs)
         start_time = kwargs.get("start_time")
+        end_time = kwargs.get("end_time")
         limit = kwargs.get("limit") or len(self.logs)
         offset = kwargs.get("offset") or 0
         items = [
             item
             for item in self.logs
-            if start_time is None or NormalizedLog.model_validate(item).event_time > start_time
+            if (start_time is None or NormalizedLog.model_validate(item).event_time > start_time)
+            and (end_time is None or NormalizedLog.model_validate(item).event_time <= end_time)
         ]
         items.sort(key=lambda item: NormalizedLog.model_validate(item).event_time, reverse=True)
         return items[offset:offset + limit], len(items)
@@ -323,3 +326,43 @@ def test_worker_attaches_baseline_deviations_to_rule_anomaly() -> None:
         }
     ]
     assert anomaly.risk_components["baseline_deviation"] == 25
+
+
+def test_worker_recovers_recent_window_state_without_reinserting_warmup_anomalies() -> None:
+    warmup_count = settings.threshold_ip_fail_5m - 1
+    logs = [
+        build_log(
+            idx,
+            event_time=BASE_TIME + timedelta(seconds=idx),
+            ingest_time=BASE_TIME + timedelta(seconds=idx),
+            src_ip="198.51.100.7",
+            user_id=f"user-{idx}",
+        )
+        for idx in range(1, warmup_count + 1)
+    ]
+    logs.append(
+        build_log(
+            99,
+            event_time=BASE_TIME + timedelta(minutes=1),
+            ingest_time=BASE_TIME + timedelta(minutes=1),
+            src_ip="198.51.100.7",
+            user_id="user-new",
+        )
+    )
+    storage = FakeStorage(logs)
+    worker = AnomalyDetectorWorker(
+        storage=storage,
+        lookback_minutes=5,
+        batch_size=100,
+        recover_state_on_start=True,
+        clock=lambda: BASE_TIME + timedelta(minutes=2),
+    )
+
+    warmed = worker.recover_recent_state(end_time=BASE_TIME + timedelta(seconds=warmup_count + 1))
+    summary = worker.run_once()
+
+    assert warmed == warmup_count
+    assert summary.logs_read == 1
+    assert summary.anomalies_inserted > 0
+    assert len(storage.inserted_batches) == 1
+    assert all("evt-99" in anomaly.related_event_ids for anomaly in storage.inserted_batches[0])

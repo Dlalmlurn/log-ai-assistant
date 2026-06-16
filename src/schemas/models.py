@@ -34,6 +34,7 @@ BaselineOverrideSource = Literal["manual", "ai_feedback"]
 BaselineOverrideStatus = Literal["pending", "active", "rejected", "revoked", "expired"]
 TaskRunStatus = Literal["queued", "running", "succeeded", "failed", "needs_review", "cancelled"]
 NotificationStatus = Literal["pending", "delivering", "delivered", "retry_wait", "dead_letter"]
+UserRiskWindow = Literal["24h", "7d", "30d", "custom"]
 ResponseItemT = TypeVar("ResponseItemT")
 
 
@@ -133,6 +134,8 @@ class AnomalyEvent(BaseModel):
 
     ai_status: AIStatus = "not_required"
     status: AnomalyStatus = "new"
+    model_version: str | None = None
+    scoring_version: str | None = None
     created_at: datetime
 
 
@@ -593,10 +596,14 @@ class UserRiskStats(BaseModel):
     """User risk ranking row derived from anomaly_events."""
 
     user_id: str
+    window: UserRiskWindow = "7d"
     anomaly_count: int = Field(default=0, ge=0)
     high_risk_count: int = Field(default=0, ge=0)
     critical_count: int = Field(default=0, ge=0)
     max_risk_score: float = Field(default=0, ge=0, le=100)
+    active_risk_score: float = Field(default=0, ge=0)
+    decayed_risk_score: float = Field(default=0, ge=0)
+    false_positive_excluded_count: int = Field(default=0, ge=0)
     latest_event_time: datetime | None = None
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from src.config import settings
@@ -99,6 +99,7 @@ ANOMALY_COLUMNS: tuple[str, ...] = (
     "ai_status",
     "status",
     "model_version",
+    "scoring_version",
     "created_at",
 )
 ANOMALY_JSON_FIELDS = {"risk_components", "baseline_deviations", "evidence"}
@@ -618,6 +619,7 @@ class ClickHouseStorage:
                 json_fields=ANOMALY_JSON_FIELDS,
                 defaults={
                     "model_version": "",
+                    "scoring_version": "",
                     "ai_status": "not_required",
                     "status": "new",
                     "user_id": "",
@@ -682,9 +684,11 @@ class ClickHouseStorage:
         tenant_id: str | None = None,
         start_time: datetime | None = None,
         end_time: datetime | None = None,
+        window: str = "7d",
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[dict[str, Any]], int]:
+        start_time, end_time, resolved_window = _resolve_user_risk_window(window, start_time, end_time)
         filters, parameters = _build_anomaly_filters(
             tenant_id=tenant_id,
             start_time=start_time,
@@ -693,19 +697,30 @@ class ClickHouseStorage:
         filters.append("user_id != ''")
         where_sql = _where(filters)
         parameters |= _pagination_parameters(limit=limit, offset=offset)
+        parameters["decay_reference"] = end_time or datetime.now(timezone.utc)
+        parameters["half_life_seconds"] = float(7 * 24 * 60 * 60)
+        parameters["window"] = resolved_window
         rows = self._select_dicts(
             f"""
             SELECT
                 user_id,
-                count() AS anomaly_count,
-                countIf(risk_level IN ('high', 'critical')) AS high_risk_count,
-                countIf(risk_level = 'critical') AS critical_count,
-                max(risk_score) AS max_risk_score,
+                {{window:String}} AS window,
+                countIf(status != 'false_positive') AS anomaly_count,
+                countIf(status != 'false_positive' AND risk_level IN ('high', 'critical')) AS high_risk_count,
+                countIf(status != 'false_positive' AND risk_level = 'critical') AS critical_count,
+                maxIf(risk_score, status != 'false_positive') AS max_risk_score,
+                sumIf(risk_score, status != 'false_positive') AS active_risk_score,
+                sumIf(
+                    risk_score * pow(0.5, greatest(dateDiff('second', event_time, {{decay_reference:DateTime64(3)}}), 0) / {{half_life_seconds:Float64}}),
+                    status != 'false_positive'
+                ) AS decayed_risk_score,
+                countIf(status = 'false_positive') AS false_positive_excluded_count,
                 max(event_time) AS latest_event_time
             FROM anomaly_events
             {where_sql}
             GROUP BY user_id
-            ORDER BY high_risk_count DESC, max_risk_score DESC, anomaly_count DESC, latest_event_time DESC
+            HAVING anomaly_count > 0
+            ORDER BY decayed_risk_score DESC, high_risk_count DESC, max_risk_score DESC, anomaly_count DESC, latest_event_time DESC
             LIMIT {{limit:UInt64}} OFFSET {{offset:UInt64}}
             """,
             parameters,
@@ -718,6 +733,7 @@ class ClickHouseStorage:
                 FROM anomaly_events
                 {where_sql}
                 GROUP BY user_id
+                HAVING countIf(status != 'false_positive') > 0
             )
             """,
             parameters,
@@ -1352,7 +1368,8 @@ class ClickHouseStorage:
             f"""
             SELECT
                 event_id, event_time, detect_time, risk_level, risk_score,
-                scenario_id, scenario_type, attack_chain_id, related_event_ids
+                attack_type, reason_codes, scenario_id, scenario_type,
+                attack_chain_id, related_event_ids, scoring_version
             FROM anomaly_events
             {_where(anomaly_filters)}
             ORDER BY detect_time ASC
@@ -1917,6 +1934,26 @@ def _build_anomaly_filters(
         filters.append("has(reason_codes, {reason_code:String})")
         parameters["reason_code"] = reason_code
     return filters, parameters
+
+
+def _resolve_user_risk_window(
+    window: str,
+    start_time: datetime | None,
+    end_time: datetime | None,
+) -> tuple[datetime | None, datetime | None, str]:
+    resolved_window = window if window in {"24h", "7d", "30d", "custom"} else "7d"
+    if resolved_window == "custom":
+        return start_time, end_time, resolved_window
+
+    reference_time = end_time or datetime.now(timezone.utc)
+    if reference_time.tzinfo is None:
+        reference_time = reference_time.replace(tzinfo=timezone.utc)
+    window_deltas = {
+        "24h": timedelta(hours=24),
+        "7d": timedelta(days=7),
+        "30d": timedelta(days=30),
+    }
+    return reference_time - window_deltas[resolved_window], reference_time, resolved_window
 
 
 def _build_baseline_filters(

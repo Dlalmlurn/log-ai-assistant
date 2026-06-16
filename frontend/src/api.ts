@@ -224,7 +224,7 @@ export async function fetchStatsOverview(
 }
 
 export async function fetchUserRiskStats(
-  query: PaginationQuery,
+  query: PaginationQuery & Partial<{ tenant_id: string; window: UserRiskStats["window"]; start_time: string; end_time: string }>,
   signal?: AbortSignal
 ): Promise<ListResponse<UserRiskStats>> {
   return apiFetch<ListResponse<UserRiskStats>>(withQuery("/api/v1/stats/users/risk", query), { signal });

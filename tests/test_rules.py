@@ -88,9 +88,9 @@ def test_new_ip_then_sensitive_access() -> None:
 def test_off_hours_login_only_never_reaches_critical() -> None:
     """【误报控制回归】非工作时间登录但无任何敏感行为时，风险分绝不突破 critical 区间。
 
-    rare_login_hour 的风险组成为：rule_strength:20 + baseline_deviation:5 = 25（low 级别）。
+    rare_login_hour 的风险组成为：rule_strength:15 + baseline_deviation:10 = 25（low 级别）。
     即便将来附加了 time baseline 偏离（medium severity → +15 baseline_deviation），
-    总分上限也仅为 ~35，严禁进入 critical（≥ 90）甚至 high（≥ 70）区间。
+    总分上限也仅为 ~30，严禁进入 critical（≥ 76）甚至 high（≥ 51）区间。
     """
     # 选择工作时间之外的小时（凌晨 2 点，settings.work_hour_start 默认 9）
     off_hour_time = datetime(2026, 4, 1, 2, 0, 0)
@@ -115,12 +115,12 @@ def test_off_hours_login_only_never_reaches_critical() -> None:
         assert "sensitive_resource_access" not in alert.reason_codes
         assert "new_source_then_sensitive_access" not in alert.reason_codes
 
-        # 风险分严禁突破 critical（≥ 90）
-        assert alert.risk_score < 90, (
+        # 风险分严禁突破 critical（≥ 76）
+        assert alert.risk_score < 76, (
             f"非工作时间单纯登录不应达到 critical，实际得分 {alert.risk_score}"
         )
-        # 同时也不应达到 high（≥ 70）——单独 rare_login_hour 不足以触发高风险
-        assert alert.risk_score < 70, (
+        # 同时也不应达到 high（≥ 51）——单独 rare_login_hour 不足以触发高风险
+        assert alert.risk_score < 51, (
             f"非工作时间单纯登录不应达到 high，实际得分 {alert.risk_score}"
         )
         assert alert.risk_level != "critical"
@@ -145,8 +145,8 @@ def test_maintenance_and_allowlist_mitigate_without_dropping_event() -> None:
     assert "maintenance_window" in admin_alert.reason_codes
     assert "allowlisted_context" in admin_alert.reason_codes
     assert admin_alert.evidence["risk_mitigations"] == ["maintenance_window", "allowlisted_context"]
-    assert admin_alert.risk_components["feedback_adjustment"] == -30
-    assert admin_alert.risk_score < 70
+    assert admin_alert.risk_components["feedback_adjustment"] == -10
+    assert admin_alert.risk_score < 51
     assert admin_alert.status == "new"
 
 

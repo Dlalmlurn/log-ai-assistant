@@ -85,6 +85,14 @@ Python Producer 可以写入测试性输入，但只作为辅助工具，不作�
 | `risk_tags` | 否 | array | 解析阶段产生的风险标签。 |
 | `attrs` | 否 | object | 原始字段和扩展字段。 |
 
+当 `resource` 或 `object_id` 是 URL/path 时，解析层应在 `attrs` 中追加以下扩展字段，原始 `resource` 不得被覆盖：
+
+| `attrs` 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `url_template` | string | 去除动态 ID、时间戳、token 等后的资源模板。 |
+| `resource_fingerprint` | string | 基于 `url_template` 的稳定短哈希。 |
+| `resource_normalization_version` | string | 资源归一化策略版本。 |
+
 ## VPN 字段映射
 
 VPN 日志可以作为第一类结构化日志来源，但不是项目全部日志来源。
@@ -219,6 +227,8 @@ AI 反馈创建的覆盖项初始状态必须为 `pending`，只有人工接受�
 | `risk_score` | 是 | float | 0 到 100 风险分。 |
 | `risk_level` | 是 | enum | `low`, `medium`, `high`, `critical`。 |
 | `risk_components` | 是 | object | 规则强度、baseline 偏离、敏感度、关联度、反馈修正。 |
+| `model_version` | 否 | string | 规则或检测模型版本。 |
+| `scoring_version` | 是 | string | 评分策略版本，例如 `risk-scoring-v1`。 |
 | `rule_hits` | 是 | array | 命中的规则 ID。 |
 | `baseline_deviations` | 是 | array | baseline 偏离证据。 |
 | `reason_codes` | 是 | array | 可解释原因编码。 |

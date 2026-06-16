@@ -529,8 +529,19 @@ def test_list_user_risk_stats_excludes_empty_users_and_orders_by_risk() -> None:
     fake = FakeClickHouseClient(
         [
             QueryResult(
-                [("alice", 4, 2, 1, 96.0, now)],
-                ["user_id", "anomaly_count", "high_risk_count", "critical_count", "max_risk_score", "latest_event_time"],
+                [("alice", "7d", 4, 2, 1, 96.0, 180.0, 126.5, 1, now)],
+                [
+                    "user_id",
+                    "window",
+                    "anomaly_count",
+                    "high_risk_count",
+                    "critical_count",
+                    "max_risk_score",
+                    "active_risk_score",
+                    "decayed_risk_score",
+                    "false_positive_excluded_count",
+                    "latest_event_time",
+                ],
             ),
             QueryResult([(1,)]),
         ]
@@ -541,10 +552,18 @@ def test_list_user_risk_stats_excludes_empty_users_and_orders_by_risk() -> None:
 
     assert total == 1
     assert items[0]["user_id"] == "alice"
+    assert items[0]["window"] == "7d"
     assert items[0]["critical_count"] == 1
+    assert items[0]["false_positive_excluded_count"] == 1
     assert "user_id != ''" in fake.queries[0]["sql"]
-    assert "ORDER BY high_risk_count DESC, max_risk_score DESC" in fake.queries[0]["sql"]
-    assert fake.queries[0]["parameters"] == {"tenant_id": "default", "limit": 10, "offset": 0}
+    assert "countIf(status != 'false_positive') AS anomaly_count" in fake.queries[0]["sql"]
+    assert "countIf(status = 'false_positive') AS false_positive_excluded_count" in fake.queries[0]["sql"]
+    assert "ORDER BY decayed_risk_score DESC, high_risk_count DESC" in fake.queries[0]["sql"]
+    assert fake.queries[0]["parameters"]["tenant_id"] == "default"
+    assert fake.queries[0]["parameters"]["limit"] == 10
+    assert fake.queries[0]["parameters"]["offset"] == 0
+    assert fake.queries[0]["parameters"]["window"] == "7d"
+    assert fake.queries[0]["parameters"]["start_time"] < fake.queries[0]["parameters"]["end_time"]
 
 
 def test_aggregate_daily_features_sql_groups_by_user_in_clickhouse() -> None:

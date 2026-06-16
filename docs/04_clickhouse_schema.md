@@ -305,6 +305,7 @@ CREATE TABLE anomaly_events
     ai_status LowCardinality(String) DEFAULT 'not_required',
     status LowCardinality(String) DEFAULT 'new',
     model_version String DEFAULT '',
+    scoring_version String DEFAULT '',
     created_at DateTime DEFAULT now()
 )
 ENGINE = MergeTree

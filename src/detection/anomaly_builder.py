@@ -12,55 +12,8 @@ import hashlib
 from typing import Any
 import uuid
 
+from src.detection.scoring import RISK_COMPONENT_KEYS, score_event
 from src.schemas import AnomalyEvent, NormalizedLog
-
-
-# risk_components 的固定字段。前端、ClickHouse、AI 分析都可以按这些字段理解风险来源。
-RISK_COMPONENT_KEYS: tuple[str, ...] = (
-    "rule_strength",
-    "baseline_deviation",
-    "behavior_sensitivity",
-    "event_correlation",
-    "feedback_adjustment",
-)
-
-# 每个 reason_code 对应的风险分数组成。
-# 这里不是最终总分，而是告诉系统“这个异常为什么危险”。
-REASON_RISK_COMPONENTS: dict[str, dict[str, int]] = {
-    "failed_login_spike": {"rule_strength": 45},
-    "credential_stuffing_pattern": {"rule_strength": 65, "event_correlation": 20},
-    "new_source_ip": {"rule_strength": 35, "baseline_deviation": 10},
-    "rare_login_hour": {"rule_strength": 20, "baseline_deviation": 5},
-    "sensitive_resource_access": {"rule_strength": 35, "behavior_sensitivity": 25},
-    "new_source_then_sensitive_access": {
-        "rule_strength": 55,
-        "baseline_deviation": 15,
-        "behavior_sensitivity": 20,
-        "event_correlation": 20,
-    },
-    "admin_resource_access": {"rule_strength": 55, "behavior_sensitivity": 25},
-    "high_api_rate": {"rule_strength": 40},
-    "download_volume_spike": {
-        "rule_strength": 60,
-        "behavior_sensitivity": 30,
-        "event_correlation": 15,
-    },
-    "vpn_traffic_volume_spike": {"rule_strength": 45, "behavior_sensitivity": 20},
-    "permission_change": {"rule_strength": 45, "behavior_sensitivity": 25},
-    "lateral_movement_signal": {"rule_strength": 60, "event_correlation": 25},
-    "service_account_anomaly": {"rule_strength": 55, "baseline_deviation": 15},
-    "system_error_pattern": {"rule_strength": 30},
-    "maintenance_window": {"feedback_adjustment": -20},
-    "allowlisted_context": {"feedback_adjustment": -30},
-}
-
-# baseline 偏离程度到分数的映射。后续接入用户行为基线时会用到。
-BASELINE_SEVERITY_SCORES = {
-    "low": 5,
-    "medium": 15,
-    "high": 25,
-    "critical": 35,
-}
 
 # reason_code 到 attack_type 的映射。
 # reason_code 是具体原因，attack_type 是更大的攻击/异常类别。
@@ -132,13 +85,11 @@ class AnomalyEventBuilder:
         normalized_baseline_deviations = baseline_deviations or []
 
         # 先算风险明细，再由明细汇总出总分和等级。
-        risk_components = _risk_components(
-            normalized_reason_codes,
-            normalized_baseline_deviations,
-            risk_component_overrides or {},
+        risk_components, risk_score, risk_level, scoring_version = score_event(
+            reason_codes=normalized_reason_codes,
+            baseline_deviations=normalized_baseline_deviations,
+            risk_component_overrides=risk_component_overrides or {},
         )
-        risk_score = _risk_score(risk_components)
-        risk_level = _risk_level(risk_score)
         now = self._clock()
 
         # payload 的字段尽量贴近 AnomalyEvent schema，后续落库/API 展示都吃这一份结构。
@@ -170,6 +121,7 @@ class AnomalyEventBuilder:
             "ai_status": "pending" if risk_level in {"high", "critical"} else "not_required",
             "status": "new",
             "model_version": model_version,
+            "scoring_version": scoring_version,
             "created_at": now,
         }
         return AnomalyEvent.model_validate(payload)
@@ -188,63 +140,6 @@ def _event_id(seed: str | None) -> str:
         return str(uuid.uuid4())
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
     return f"anom-{digest[:32]}"
-
-
-def _risk_components(
-    reason_codes: Iterable[str],
-    baseline_deviations: list[dict[str, Any]],
-    risk_component_overrides: dict[str, int],
-) -> dict[str, int]:
-    """根据 reason_codes 和 baseline 偏离计算风险明细。"""
-
-    components = {key: 0 for key in RISK_COMPONENT_KEYS}
-    for reason_code in reason_codes:
-        # 未知 reason_code 给一个保守的规则强度分，避免事件完全没有风险解释。
-        for key, score in REASON_RISK_COMPONENTS.get(reason_code, {"rule_strength": 20}).items():
-            # 同一个维度取最大值，不把多个规则简单叠加到失真。
-            if key == "feedback_adjustment" and score < 0:
-                components[key] = min(components[key], score)
-            else:
-                components[key] = max(components[key], score)
-
-    baseline_score = max(
-        [_baseline_deviation_score(item) for item in baseline_deviations],
-        default=0,
-    )
-    components["baseline_deviation"] = max(components["baseline_deviation"], baseline_score)
-    for key, score in risk_component_overrides.items():
-        if key in components:
-            if key == "feedback_adjustment" and score < 0:
-                components[key] = min(components[key], score)
-            else:
-                components[key] = max(components[key], score)
-    return components
-
-
-def _baseline_deviation_score(deviation: dict[str, Any]) -> int:
-    """把 baseline_deviation 里的 severity 转成分数。"""
-
-    raw_severity = deviation.get("severity", "low")
-    severity = str(raw_severity).lower()
-    return BASELINE_SEVERITY_SCORES.get(severity, BASELINE_SEVERITY_SCORES["low"])
-
-
-def _risk_score(components: dict[str, int]) -> float:
-    """把风险明细求和成总分，并限制在 0 到 100 之间。"""
-
-    return float(max(0, min(100, sum(components.values()))))
-
-
-def _risk_level(score: float) -> str:
-    """把数值分数转换成 low/medium/high/critical 等级。"""
-
-    if score >= 90:
-        return "critical"
-    if score >= 70:
-        return "high"
-    if score >= 40:
-        return "medium"
-    return "low"
 
 
 def _attack_type(reason_codes: Iterable[str]) -> str:

@@ -31,10 +31,14 @@ class FakeWorkbenchStorage:
             [
                 {
                     "user_id": "alice",
+                    "window": "7d",
                     "anomaly_count": 4,
                     "high_risk_count": 2,
                     "critical_count": 1,
                     "max_risk_score": 96,
+                    "active_risk_score": 180,
+                    "decayed_risk_score": 126.5,
+                    "false_positive_excluded_count": 1,
                     "latest_event_time": datetime(2026, 5, 13, 10, 0, tzinfo=timezone.utc),
                 }
             ],
@@ -117,6 +121,7 @@ def test_list_user_risk_stats_queries_storage_with_pagination() -> None:
 
     response = list_user_risk_stats(
         tenant_id="default",
+        window="7d",
         start_time=None,
         end_time=None,
         limit=10,
@@ -127,10 +132,13 @@ def test_list_user_risk_stats_queries_storage_with_pagination() -> None:
     assert response.total == 1
     assert response.items[0].user_id == "alice"
     assert response.items[0].high_risk_count == 2
+    assert response.items[0].window == "7d"
+    assert response.items[0].false_positive_excluded_count == 1
     assert storage.calls == [
         {
             "method": "list_user_risk_stats",
             "tenant_id": "default",
+            "window": "7d",
             "start_time": None,
             "end_time": None,
             "limit": 10,

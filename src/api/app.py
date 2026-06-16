@@ -56,6 +56,7 @@ from src.schemas import (
     UserBaseline,
     UserBaselineListResponse,
     UserRiskStatsListResponse,
+    UserRiskWindow,
 )
 from src.storage import ClickHouseStorage
 from src.ueba import build_and_store_baselines
@@ -1342,6 +1343,7 @@ def get_stats_overview(
 )
 def list_user_risk_stats(
     tenant_id: str | None = Query(default=None),
+    window: UserRiskWindow = Query(default="7d", description="Risk aggregation window: 24h, 7d, 30d, or custom."),
     start_time: datetime | None = Query(default=None),
     end_time: datetime | None = Query(default=None),
     limit: int = Query(default=20, ge=1),
@@ -1353,6 +1355,7 @@ def list_user_risk_stats(
             tenant_id=tenant_id,
             start_time=start_time,
             end_time=end_time,
+            window=window,
             limit=limit,
             offset=offset,
         )

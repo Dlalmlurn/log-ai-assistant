@@ -86,6 +86,8 @@ export type AnomalyEvent = {
   attack_chain_id?: string | null;
   ai_status: "not_required" | "pending" | "analyzed" | "failed";
   status: "new" | "investigating" | "closed" | "false_positive";
+  model_version?: string | null;
+  scoring_version?: string | null;
   created_at: string;
 };
 
@@ -235,10 +237,14 @@ export type StatsOverview = {
 
 export type UserRiskStats = {
   user_id: string;
+  window: "24h" | "7d" | "30d" | "custom";
   anomaly_count: number;
   high_risk_count: number;
   critical_count: number;
   max_risk_score: number;
+  active_risk_score: number;
+  decayed_risk_score: number;
+  false_positive_excluded_count: number;
   latest_event_time: string | null;
 };
 

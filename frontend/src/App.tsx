@@ -420,7 +420,7 @@ function SystemStatusPage() {
         }
         setStatsState((current) => ({ ...current, loading: false, error: formatError(error) }));
       });
-    fetchUserRiskStats({ limit: 5, offset: 0 }, signal)
+    fetchUserRiskStats({ limit: 5, offset: 0, window: "7d" }, signal)
       .then((data) => setRiskState({ data: { items: data.items, total: data.total }, loading: false, error: null, updatedAt: new Date() }))
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError") {
@@ -555,7 +555,7 @@ function SystemStatusPage() {
 
       <div className="section-title">
         <h2>用户风险排行</h2>
-        <span>来自 /api/v1/stats/users/risk 的高风险用户</span>
+        <span>7 天窗口，已剔除确认误报</span>
       </div>
       <div className="compact-list">
         {riskState.data?.items.map((item) => (
@@ -567,7 +567,8 @@ function SystemStatusPage() {
             <div className="tag-list">
               <span>{item.anomaly_count} 个异常</span>
               <span>{item.high_risk_count} 个高危+</span>
-              <span>最高 {item.max_risk_score}</span>
+              <span>衰减 {formatNumber(item.decayed_risk_score)}</span>
+              <span>误报剔除 {item.false_positive_excluded_count}</span>
             </div>
           </article>
         ))}
@@ -1272,6 +1273,7 @@ function AlertDetailPanel({
             </div>
             <div className="metrics-band compact-metrics">
               <Metric icon={BarChart3} label="风险分数" value={String(detail.anomaly.risk_score)} hint="0 到 100" />
+              <Metric icon={ShieldCheck} label="评分版本" value={detail.anomaly.scoring_version || "-"} hint={detail.anomaly.model_version || "检测模型未声明"} />
               <Metric icon={ListFilter} label="原因码" value={String(detail.anomaly.reason_codes.length)} hint={detail.anomaly.reason_codes.slice(0, 2).join(", ") || "无"} />
               <Metric icon={Sparkles} label="AI 状态" value={formatAIStatus(detail.anomaly.ai_status)} hint={isEmptyRecord(detail.ai_judgement) ? "暂无研判记录" : "已有研判结果"} />
             </div>

@@ -57,6 +57,7 @@ from .models import (
     UserDailyFeature,
     UserRiskStats,
     UserRiskStatsListResponse,
+    UserRiskWindow,
     TaskRunStatus,
 )
 
@@ -119,5 +120,6 @@ __all__ = [
     "UserDailyFeature",
     "UserRiskStats",
     "UserRiskStatsListResponse",
+    "UserRiskWindow",
     "TaskRunStatus",
 ]

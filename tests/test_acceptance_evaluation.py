@@ -46,6 +46,7 @@ class AcceptanceStorage:
                 "detect_time": NOW + timedelta(seconds=index + 10),
                 "risk_level": "high",
                 "risk_score": 80,
+                "attack_type": ("credential_stuffing", "account_takeover", "data_exfiltration")[index - 1],
                 "attack_chain_id": f"chain-{index}",
                 "related_event_ids": [f"attack-{index}"],
             }
@@ -75,6 +76,9 @@ def test_acceptance_reports_separate_rates_latency_and_real_mock_ai(tmp_path: Pa
         "attack_detection_rate_min": 0.8,
         "high_risk_detection_rate_min": 0.8,
         "traceability_rate_min": 0.95,
+        "precision_high_risk_min": 0.8,
+        "attack_event_recall_min": 0.8,
+        "risk_level_accuracy_min": 0.8,
         "detection_latency_p95_seconds_max": 120,
         "notification_latency_p95_seconds_max": 300,
     }
@@ -109,6 +113,10 @@ def test_acceptance_reports_separate_rates_latency_and_real_mock_ai(tmp_path: Pa
     assert by_name["attack_detection_rate"].value == 1
     assert by_name["high_risk_detection_rate"].value == 1
     assert by_name["traceability_rate"].value == 1
+    assert by_name["precision_high_risk"].value == 1
+    assert by_name["attack_event_recall"].value == 1
+    assert by_name["attack_type_confusion_matrix"].details["credential_stuffing"]["credential_stuffing"] == 1
+    assert by_name["risk_level_accuracy"].value == 1
     assert by_name["detection_latency_p95_seconds"].value == 10
     assert by_name["notification_latency_p95_seconds"].value == 10
     assert by_name["ai_real_coverage_rate"].details["is_mock"] is False
