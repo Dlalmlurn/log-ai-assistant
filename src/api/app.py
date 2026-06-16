@@ -370,6 +370,113 @@ def get_alert_detail(
 
 
 @app.post(
+    "/api/v1/anomalies/{event_id}/flag-false-positive",
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["anomalies"],
+    summary="Flag an anomaly as potential false positive for review",
+)
+def flag_false_positive(
+    event_id: str,
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> dict[str, str]:
+    try:
+        alert = storage.get_anomaly(event_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "clickhouse_query_failed", "message": "Failed to query anomaly", "details": {"event_id": event_id}},
+        ) from exc
+    if not alert:
+        raise HTTPException(status_code=404, detail={"code": "anomaly_not_found", "message": "Anomaly not found", "details": {"event_id": event_id}})
+
+    storage.update_anomaly_status(event_id, "pending_review")
+    storage.insert_feedback(AIFeedback(
+        feedback_id=f"fb-{uuid.uuid4()}",
+        event_id=event_id,
+        tenant_id=str(alert.get("tenant_id", "default")),
+        user_id=str(alert.get("user_id", "")),
+        feedback_type="false_positive",
+        suggestion="分析员将此异常标记为误报复核。",
+        target_component="scoring",
+        confidence=1,
+        review_status="pending",
+        created_at=datetime.now(timezone.utc),
+    ))
+    return {"status": "ok", "event_id": event_id, "anomaly_status": "pending_review"}
+
+
+def _reason_codes_combo(alert: dict[str, Any]) -> str:
+    codes: list[str] = sorted([str(c) for c in (alert.get("reason_codes") or [])])
+    return ",".join(codes)
+
+
+@app.post(
+    "/api/v1/anomalies/{event_id}/confirm-false-positive",
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["anomalies"],
+    summary="Confirm a reviewed anomaly as false positive",
+)
+def confirm_false_positive(
+    event_id: str,
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> dict[str, str]:
+    try:
+        alert = storage.get_anomaly(event_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "clickhouse_query_failed", "message": "Failed to query anomaly", "details": {"event_id": event_id}},
+        ) from exc
+    if not alert:
+        raise HTTPException(status_code=404, detail={"code": "anomaly_not_found", "message": "Anomaly not found", "details": {"event_id": event_id}})
+
+    storage.update_anomaly_status(event_id, "false_positive")
+    # Feedback loop: increment false-positive count for this reason-code combo
+    combo = _reason_codes_combo(alert)
+    if combo:
+        storage.upsert_reason_code_feedback_stats(
+            tenant_id=str(alert.get("tenant_id", "default")),
+            user_id=str(alert.get("user_id", "")),
+            reason_codes_combo=combo,
+            fp_delta=1,
+        )
+    return {"status": "ok", "event_id": event_id, "anomaly_status": "false_positive"}
+
+
+@app.post(
+    "/api/v1/anomalies/{event_id}/reject-false-positive",
+    responses=STANDARD_ERROR_RESPONSES,
+    tags=["anomalies"],
+    summary="Reject a false-positive review — send back to anomaly list",
+)
+def reject_false_positive(
+    event_id: str,
+    storage: ClickHouseStorage = Depends(get_storage),
+) -> dict[str, str]:
+    try:
+        alert = storage.get_anomaly(event_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "clickhouse_query_failed", "message": "Failed to query anomaly", "details": {"event_id": event_id}},
+        ) from exc
+    if not alert:
+        raise HTTPException(status_code=404, detail={"code": "anomaly_not_found", "message": "Anomaly not found", "details": {"event_id": event_id}})
+
+    storage.update_anomaly_status(event_id, "rejected")
+    # Feedback loop: increment confirmed (true-positive) count for this reason-code combo
+    combo = _reason_codes_combo(alert)
+    if combo:
+        storage.upsert_reason_code_feedback_stats(
+            tenant_id=str(alert.get("tenant_id", "default")),
+            user_id=str(alert.get("user_id", "")),
+            reason_codes_combo=combo,
+            confirmed_delta=1,
+        )
+    return {"status": "ok", "event_id": event_id, "anomaly_status": "rejected"}
+
+
+@app.post(
     "/api/v1/ai/judge/{event_id}",
     response_model=AIJudgement,
     responses=STANDARD_ERROR_RESPONSES,

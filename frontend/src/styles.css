@@ -1809,3 +1809,57 @@ body {
     flex-direction: column;
   }
 }
+
+/* ---- split panels (AI Judgement) ---- */
+.split-panels {
+  display: flex;
+  gap: 24px;
+  flex: 1;
+  min-height: 0;
+}
+
+.page-panel {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.page-panel .section-header {
+  position: sticky;
+  top: 0;
+  background: var(--bg-surface, #fff);
+  z-index: 1;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border-color, #eee);
+}
+
+.page-panel .compact-list {
+  max-height: calc(100vh - 280px);
+  overflow-y: auto;
+}
+
+.ai-result-inline {
+  margin-top: 10px;
+  padding: 10px;
+  background: var(--bg-subtle, #f8f9fa);
+  border-radius: 6px;
+  border-left: 3px solid var(--primary-color, #4f46e5);
+}
+
+.ai-result-inline p {
+  margin: 0 0 6px 0;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+/* ---- processed card ---- */
+.judgement-card.processed {
+  opacity: 0.75;
+  border-left: 3px solid var(--ok-color, #22c55e);
+}
+
+.judgement-card.processed .risk-chip.ok {
+  background: var(--ok-bg, #dcfce7);
+  color: var(--ok-text, #166534);
+}

@@ -85,7 +85,7 @@ export type AnomalyEvent = {
   scenario_type?: string | null;
   attack_chain_id?: string | null;
   ai_status: "not_required" | "pending" | "analyzed" | "failed";
-  status: "new" | "investigating" | "closed" | "false_positive";
+  status: "new" | "investigating" | "closed" | "false_positive" | "pending_review" | "rejected";
   model_version?: string | null;
   scoring_version?: string | null;
   created_at: string;
@@ -388,6 +388,7 @@ export type AlertsQuery = {
   risk_level?: RiskLevel | "";
   user_id?: string;
   reason_code?: string;
+  ai_status?: string;
   status?: string;
   start_time?: string;
   end_time?: string;

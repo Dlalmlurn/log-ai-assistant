@@ -274,6 +274,11 @@ def build_baselines_from_daily_features(
         record = dict(zip(cols, row))
         by_user[str(record["user_id"])].append(record)
 
+    try:
+        feedback_stats = storage.get_user_reason_feedback_stats(tenant_id=tenant_id)
+    except Exception:
+        feedback_stats = {}
+
     DAILY_NUMERIC = (
         "login_count", "failed_login_count", "success_login_count",
         "distinct_src_ip_count", "distinct_host_count", "distinct_action_count",
@@ -296,6 +301,7 @@ def build_baselines_from_daily_features(
                     period_key=period_key,
                     lookback_days=lookback_days,
                     numeric_fields=DAILY_NUMERIC,
+                    feedback_stats=feedback_stats,
                 )
             )
 
@@ -362,6 +368,7 @@ def _build_daily_feature_baseline(
     period_key: str,
     lookback_days: int,
     numeric_fields: tuple[str, ...],
+    feedback_stats: dict[str, dict[str, int]] | None = None,
 ) -> UserBaseline:
     import math
     import statistics
@@ -435,7 +442,18 @@ def _build_daily_feature_baseline(
     profiles = (who, time_profile, location, access, volume, result)
     feature_values = [value for profile in profiles for value in profile.values()]
     feature_score = sum(value not in (None, "", [], {}) for value in feature_values) / max(len(feature_values), 1)
-    confidence = max(0.05, min(0.95, round(0.4 * days_score + 0.3 * volume_score + 0.3 * feature_score, 2)))
+    review_score = 0.5
+    if feedback_stats:
+        prefix = f"{user_id}:"
+        user_fps = sum(v.get("fp_count", 0) for k, v in feedback_stats.items() if k.startswith(prefix))
+        user_confirmed = sum(v.get("confirmed_count", 0) for k, v in feedback_stats.items() if k.startswith(prefix))
+        total = user_fps + user_confirmed
+        if total > 0:
+            review_score = user_confirmed / total
+    bonus = 1.0 if sample_days >= 30 else 0.0
+    confidence = max(0.05, min(0.95, round(
+        0.35 * days_score + 0.25 * volume_score + 0.25 * feature_score + 0.10 * review_score + 0.05 * bonus, 2
+    )))
 
     return UserBaseline(
         baseline_date=datetime.now(timezone.utc).date(),
