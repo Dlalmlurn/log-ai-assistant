@@ -13,6 +13,7 @@ import time
 from typing import Any, Protocol
 
 from src.detection.rules import DetectionContext, RuleEngine
+from src.operations.notifications import NotificationService
 from src.schemas import AnomalyEvent, NormalizedLog
 from src.ueba.deviation import (
     UserContext,
@@ -70,22 +71,27 @@ class AnomalyDetectorWorker:
         storage: DetectionStorage,
         lookback_minutes: int = 10,
         batch_size: int = 1000,
+        recover_state_on_start: bool = False,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.storage = storage
         self.lookback_minutes = lookback_minutes
         self.batch_size = batch_size
+        self.recover_state_on_start = recover_state_on_start
         self._clock = clock or _now
         self._last_event_time: datetime | None = None
         self._seen_anomaly_ids: set[str] = set()
         self._engine = RuleEngine()
         self._batch_seen_sources: set[tuple[str, str, str, str]] = set()
+        self._state_recovered = False
         # 每轮检测前按用户预取一次持久化上下文，避免逐条日志重复查询 ClickHouse 拖慢吞吐。
         self._round_contexts: dict[tuple[str, str, object], UserContext] = {}
 
     def run_once(self) -> DetectionRunSummary:
         started = time.perf_counter()
         end_time = self._clock()
+        if self.recover_state_on_start and not self._state_recovered:
+            self.recover_recent_state(end_time=end_time)
         start_time = self._start_time(end_time)
         items, total = self.storage.list_logs(
             start_time=start_time,
@@ -108,6 +114,12 @@ class AnomalyDetectorWorker:
         anomalies = _dedupe_anomalies(self._detect_logs(logs), self._seen_anomaly_ids)
         if anomalies:
             self.storage.insert_anomalies(anomalies)
+            try:
+                NotificationService(self.storage).enqueue_anomalies(anomalies)
+            except Exception:
+                # The anomaly event is the security fact. Notification intent is
+                # retried independently and must never roll back anomaly storage.
+                pass
 
         self._upsert_seen_sources(logs)
 
@@ -121,6 +133,40 @@ class AnomalyDetectorWorker:
             last_event_time=self._last_event_time,
             duration_ms=int((time.perf_counter() - started) * 1000),
         )
+
+    def recover_recent_state(self, *, end_time: datetime | None = None) -> int:
+        """Warm up short sliding windows from recent logs without inserting anomalies."""
+
+        if self._state_recovered:
+            return 0
+        resolved_end = end_time or self._clock()
+        start_time = resolved_end - timedelta(minutes=self.lookback_minutes)
+        items, total = self.storage.list_logs(
+            start_time=start_time,
+            end_time=resolved_end,
+            limit=self.batch_size,
+            offset=0,
+        )
+        if total > self.batch_size:
+            oldest_page_offset = max(total - self.batch_size, 0)
+            items, _total = self.storage.list_logs(
+                start_time=start_time,
+                end_time=resolved_end,
+                limit=self.batch_size,
+                offset=oldest_page_offset,
+            )
+        logs = [NormalizedLog.model_validate(item) for item in items]
+        logs.sort(key=lambda item: item.event_time)
+        if not logs:
+            self._state_recovered = True
+            return 0
+
+        self._round_contexts = self._prefetch_contexts(logs)
+        warmed_anomalies = self._detect_logs(logs)
+        self._seen_anomaly_ids.update(item.event_id for item in warmed_anomalies)
+        self._last_event_time = max(item.event_time for item in logs)
+        self._state_recovered = True
+        return len(logs)
 
     def run_forever(self, *, interval_seconds: int = 30) -> None:
         while True:

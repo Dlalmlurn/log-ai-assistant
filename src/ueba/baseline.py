@@ -602,21 +602,6 @@ def build_and_store_baselines(storage: ClickHouseStorage, output_path: Path | No
     # Primary path: build from daily features (T+1 from aggregated stats)
     baselines = build_baselines_from_daily_features(storage)
 
-    # Fallback: if no daily features exist, build directly from raw security_logs
-    if not baselines:
-        end_time = datetime.now(timezone.utc)
-        start_time = end_time - timedelta(days=7)
-        logs, _total = storage.list_logs(
-            start_time=start_time,
-            end_time=end_time,
-            limit=10000,
-            offset=0,
-        )
-        if not logs:
-            logs, _total = storage.list_logs(limit=10000, offset=0)
-        if logs:
-            baselines = build_baselines_from_logs(logs)
-
     if baselines:
         docs = [item.model_dump(mode="json") for item in baselines]
         storage.insert_user_baselines(baselines)

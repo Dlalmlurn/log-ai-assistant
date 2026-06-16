@@ -32,6 +32,9 @@ BaselinePeriodType = Literal[
 BaselineMergeMode = Literal["append", "replace", "adjust"]
 BaselineOverrideSource = Literal["manual", "ai_feedback"]
 BaselineOverrideStatus = Literal["pending", "active", "rejected", "revoked", "expired"]
+TaskRunStatus = Literal["queued", "running", "succeeded", "failed", "needs_review", "cancelled"]
+NotificationStatus = Literal["pending", "delivering", "delivered", "retry_wait", "dead_letter"]
+UserRiskWindow = Literal["24h", "7d", "30d", "custom"]
 ResponseItemT = TypeVar("ResponseItemT")
 
 
@@ -131,6 +134,8 @@ class AnomalyEvent(BaseModel):
 
     ai_status: AIStatus = "not_required"
     status: AnomalyStatus = "new"
+    model_version: str | None = None
+    scoring_version: str | None = None
     created_at: datetime
 
 
@@ -340,7 +345,118 @@ class DataQualityMetric(BaseModel):
     missing_action_rate: float = Field(ge=0, le=1)
     missing_result_rate: float = Field(ge=0, le=1)
     parse_error_rate: float = Field(ge=0, le=1)
+    event_id_traceability_rate: float = Field(default=1.0, ge=0, le=1)
     created_at: datetime
+
+
+class OperationsTaskRun(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    run_id: str
+    task_name: str
+    tenant_id: str = "default"
+    target_date: date
+    idempotency_key: str
+    scheduled_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    status: TaskRunStatus
+    attempt: int = Field(default=1, ge=1)
+    input_watermark: dict[str, Any] = Field(default_factory=dict)
+    output_refs: dict[str, Any] = Field(default_factory=dict)
+    code_version: str
+    error_code: str = ""
+    error_message: str = ""
+    version: int = Field(default=1, ge=1)
+
+
+class AcceptanceReport(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    report_id: str
+    tenant_id: str = "default"
+    status: Literal["passed", "failed", "needs_review"]
+    git_commit: str
+    compose_config_digest: str
+    scenario_version: str
+    policy_version: str
+    baseline_model_version: str
+    ai_model: str
+    ai_is_mock: bool
+    threshold_version: str
+    sample_from: datetime | None = None
+    sample_to: datetime | None = None
+    normal_scenario_count: int = Field(default=0, ge=0)
+    attack_scenario_count: int = Field(default=0, ge=0)
+    created_at: datetime
+    run_id: str = ""
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class AcceptanceMetric(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    report_id: str
+    metric_name: str
+    scenario_type: str = "overall"
+    numerator: float = 0
+    denominator: float = 0
+    value: float
+    threshold_operator: Literal["<=", ">=", "<", ">"]
+    threshold_value: float
+    passed: bool
+    unit: str = "ratio"
+    details: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class NotificationOutbox(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    outbox_id: str
+    idempotency_key: str
+    event_id: str
+    tenant_id: str = "default"
+    channel: str = "webhook"
+    destination: str
+    payload: dict[str, Any]
+    status: NotificationStatus = "pending"
+    attempt_count: int = Field(default=0, ge=0)
+    next_attempt_at: datetime
+    last_error: str = ""
+    created_at: datetime
+    updated_at: datetime
+    delivered_at: datetime | None = None
+    version: int = Field(default=1, ge=1)
+
+
+class NotificationAttempt(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    attempt_id: str
+    outbox_id: str
+    attempt: int = Field(ge=1)
+    started_at: datetime
+    finished_at: datetime
+    success: bool
+    response_status: int | None = None
+    duration_ms: int = Field(default=0, ge=0)
+    error_code: str = ""
+    error_message: str = ""
+    response_body: str = ""
+
+
+class ParseFailure(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    failure_id: str
+    occurred_at: datetime
+    source_topic: str
+    partition: int = 0
+    offset: int = 0
+    raw_payload: str
+    error_code: str
+    error_message: str
 
 
 class BaselineRebuildResponse(BaseModel):
@@ -411,6 +527,9 @@ class DailyReport(BaseModel):
     ai_summary: str
     recommendation: str
     markdown: str
+    run_id: str = ""
+    input_watermark: dict[str, Any] = Field(default_factory=dict)
+    quality_status: str = "unknown"
 
 
 class NormalizedLogListResponse(ListResponse[NormalizedLog]):
@@ -441,6 +560,23 @@ class DailyReportListResponse(ListResponse[DailyReport]):
     """Reusable list response for daily reports."""
 
 
+class OperationsTaskRunListResponse(ListResponse[OperationsTaskRun]):
+    """Reusable list response for operations task runs."""
+
+
+class AcceptanceReportListResponse(ListResponse[AcceptanceReport]):
+    """Reusable list response for acceptance reports."""
+
+
+class AcceptanceReportDetail(BaseModel):
+    report: AcceptanceReport
+    metrics: list[AcceptanceMetric] = Field(default_factory=list)
+
+
+class NotificationOutboxListResponse(ListResponse[NotificationOutbox]):
+    """Reusable list response for notification outbox records."""
+
+
 class StatsOverviewResponse(BaseModel):
     """Workbench overview counters backed by ClickHouse."""
 
@@ -460,10 +596,14 @@ class UserRiskStats(BaseModel):
     """User risk ranking row derived from anomaly_events."""
 
     user_id: str
+    window: UserRiskWindow = "7d"
     anomaly_count: int = Field(default=0, ge=0)
     high_risk_count: int = Field(default=0, ge=0)
     critical_count: int = Field(default=0, ge=0)
     max_risk_score: float = Field(default=0, ge=0, le=100)
+    active_risk_score: float = Field(default=0, ge=0)
+    decayed_risk_score: float = Field(default=0, ge=0)
+    false_positive_excluded_count: int = Field(default=0, ge=0)
     latest_event_time: datetime | None = None
 
 

@@ -192,6 +192,72 @@ class EventIdCheckStorage:
         return [{"event_id": "evt-1"}, {"event_id": "evt-3"}]
 
 
+class TraceabilityStorage(FakeStorage):
+    def list_logs_by_event_ids(self, event_ids):
+        # Only evt-1 made it into security_logs; evt-2 was silently dropped.
+        return [{"event_id": "evt-1"}]
+
+
+def test_build_data_quality_metrics_computes_event_id_traceability(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.jsonl"
+    rows = [
+        {
+            "event_id": "evt-1",
+            "timestamp": "2026-05-31 10:00:00",
+            "tenant_id": "default",
+            "source_type": "api",
+            "raw_file": "logs/api.log",
+            "raw_size_bytes": 300,
+            "injected_label": "normal",
+        },
+        {
+            "event_id": "evt-2",
+            "timestamp": "2026-05-31 10:00:01",
+            "tenant_id": "default",
+            "source_type": "api",
+            "raw_file": "logs/api.log",
+            "raw_size_bytes": 200,
+            "injected_label": "normal",
+        },
+    ]
+    manifest.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    metric = build_data_quality_metrics(
+        storage=TraceabilityStorage(),
+        manifest_path=manifest,
+        metric_date=date(2026, 5, 31),
+    )[0]
+
+    assert metric.event_id_traceability_rate == 0.5
+    report = build_reconciliation_report([metric])
+    assert any("event_id_traceability_rate" in item for item in report[0]["explanations"])
+
+
+def test_traceability_defaults_to_one_without_lookup(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        json.dumps(
+            {
+                "event_id": "evt-1",
+                "timestamp": "2026-05-31 10:00:00",
+                "source_type": "api",
+                "raw_file": "logs/api.log",
+                "raw_size_bytes": 100,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    metric = build_data_quality_metrics(
+        storage=FakeStorage(),
+        manifest_path=manifest,
+        metric_date=date(2026, 5, 31),
+    )[0]
+
+    assert metric.event_id_traceability_rate == 1.0
+
+
 def test_verify_manifest_event_ids_reports_missing_sampled_ids(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.jsonl"
     rows = [

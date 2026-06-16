@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from src.config import settings
 from src.schemas import (
     AIFeedback,
+    AcceptanceMetric,
+    AcceptanceReport,
     AIJudgement,
     AnomalyEvent,
     BaselineOverride,
     DailyReport,
     DataQualityMetric,
+    NotificationAttempt,
+    NotificationOutbox,
+    OperationsTaskRun,
+    ParseFailure,
     UserBaseline,
 )
 
@@ -93,6 +99,7 @@ ANOMALY_COLUMNS: tuple[str, ...] = (
     "ai_status",
     "status",
     "model_version",
+    "scoring_version",
     "created_at",
 )
 ANOMALY_JSON_FIELDS = {"risk_components", "baseline_deviations", "evidence"}
@@ -160,7 +167,108 @@ DAILY_REPORT_COLUMNS: tuple[str, ...] = (
     "ai_summary",
     "recommended_actions",
     "markdown_body",
+    "run_id",
+    "input_watermark",
+    "quality_status",
     "created_at",
+)
+
+OPERATIONS_TASK_RUN_COLUMNS: tuple[str, ...] = (
+    "run_id",
+    "task_name",
+    "tenant_id",
+    "target_date",
+    "idempotency_key",
+    "scheduled_at",
+    "started_at",
+    "finished_at",
+    "status",
+    "attempt",
+    "input_watermark",
+    "output_refs",
+    "code_version",
+    "error_code",
+    "error_message",
+    "version",
+)
+
+ACCEPTANCE_REPORT_COLUMNS: tuple[str, ...] = (
+    "report_id",
+    "tenant_id",
+    "status",
+    "git_commit",
+    "compose_config_digest",
+    "scenario_version",
+    "policy_version",
+    "baseline_model_version",
+    "ai_model",
+    "ai_is_mock",
+    "threshold_version",
+    "sample_from",
+    "sample_to",
+    "normal_scenario_count",
+    "attack_scenario_count",
+    "created_at",
+    "run_id",
+    "summary",
+)
+
+ACCEPTANCE_METRIC_COLUMNS: tuple[str, ...] = (
+    "report_id",
+    "metric_name",
+    "scenario_type",
+    "numerator",
+    "denominator",
+    "value",
+    "threshold_operator",
+    "threshold_value",
+    "passed",
+    "unit",
+    "details",
+    "created_at",
+)
+
+NOTIFICATION_OUTBOX_COLUMNS: tuple[str, ...] = (
+    "outbox_id",
+    "idempotency_key",
+    "event_id",
+    "tenant_id",
+    "channel",
+    "destination",
+    "payload",
+    "status",
+    "attempt_count",
+    "next_attempt_at",
+    "last_error",
+    "created_at",
+    "updated_at",
+    "delivered_at",
+    "version",
+)
+
+NOTIFICATION_ATTEMPT_COLUMNS: tuple[str, ...] = (
+    "attempt_id",
+    "outbox_id",
+    "attempt",
+    "started_at",
+    "finished_at",
+    "success",
+    "response_status",
+    "duration_ms",
+    "error_code",
+    "error_message",
+    "response_body",
+)
+
+PARSE_FAILURE_COLUMNS: tuple[str, ...] = (
+    "failure_id",
+    "occurred_at",
+    "source_topic",
+    "partition",
+    "offset",
+    "raw_payload",
+    "error_code",
+    "error_message",
 )
 
 AI_JUDGEMENT_COLUMNS: tuple[str, ...] = (
@@ -219,6 +327,7 @@ DATA_QUALITY_COLUMNS: tuple[str, ...] = (
     "missing_action_rate",
     "missing_result_rate",
     "parse_error_rate",
+    "event_id_traceability_rate",
     "created_at",
 )
 
@@ -510,6 +619,7 @@ class ClickHouseStorage:
                 json_fields=ANOMALY_JSON_FIELDS,
                 defaults={
                     "model_version": "",
+                    "scoring_version": "",
                     "ai_status": "not_required",
                     "status": "new",
                     "user_id": "",
@@ -574,9 +684,11 @@ class ClickHouseStorage:
         tenant_id: str | None = None,
         start_time: datetime | None = None,
         end_time: datetime | None = None,
+        window: str = "7d",
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[dict[str, Any]], int]:
+        start_time, end_time, resolved_window = _resolve_user_risk_window(window, start_time, end_time)
         filters, parameters = _build_anomaly_filters(
             tenant_id=tenant_id,
             start_time=start_time,
@@ -585,19 +697,30 @@ class ClickHouseStorage:
         filters.append("user_id != ''")
         where_sql = _where(filters)
         parameters |= _pagination_parameters(limit=limit, offset=offset)
+        parameters["decay_reference"] = end_time or datetime.now(timezone.utc)
+        parameters["half_life_seconds"] = float(7 * 24 * 60 * 60)
+        parameters["window"] = resolved_window
         rows = self._select_dicts(
             f"""
             SELECT
                 user_id,
-                count() AS anomaly_count,
-                countIf(risk_level IN ('high', 'critical')) AS high_risk_count,
-                countIf(risk_level = 'critical') AS critical_count,
-                max(risk_score) AS max_risk_score,
+                {{window:String}} AS window,
+                countIf(status != 'false_positive') AS anomaly_count,
+                countIf(status != 'false_positive' AND risk_level IN ('high', 'critical')) AS high_risk_count,
+                countIf(status != 'false_positive' AND risk_level = 'critical') AS critical_count,
+                maxIf(risk_score, status != 'false_positive') AS max_risk_score,
+                sumIf(risk_score, status != 'false_positive') AS active_risk_score,
+                sumIf(
+                    risk_score * pow(0.5, greatest(dateDiff('second', event_time, {{decay_reference:DateTime64(3)}}), 0) / {{half_life_seconds:Float64}}),
+                    status != 'false_positive'
+                ) AS decayed_risk_score,
+                countIf(status = 'false_positive') AS false_positive_excluded_count,
                 max(event_time) AS latest_event_time
             FROM anomaly_events
             {where_sql}
             GROUP BY user_id
-            ORDER BY high_risk_count DESC, max_risk_score DESC, anomaly_count DESC, latest_event_time DESC
+            HAVING anomaly_count > 0
+            ORDER BY decayed_risk_score DESC, high_risk_count DESC, max_risk_score DESC, anomaly_count DESC, latest_event_time DESC
             LIMIT {{limit:UInt64}} OFFSET {{offset:UInt64}}
             """,
             parameters,
@@ -610,6 +733,7 @@ class ClickHouseStorage:
                 FROM anomaly_events
                 {where_sql}
                 GROUP BY user_id
+                HAVING countIf(status != 'false_positive') > 0
             )
             """,
             parameters,
@@ -960,7 +1084,12 @@ class ClickHouseStorage:
 
     def insert_daily_report(self, report: DailyReport | dict[str, Any], *, tenant_id: str = "default") -> None:
         payload = _daily_report_payload(_model_payload(report), tenant_id=tenant_id)
-        row = _row_from_payload(payload, DAILY_REPORT_COLUMNS)
+        row = _row_from_payload(
+            payload,
+            DAILY_REPORT_COLUMNS,
+            json_fields={"input_watermark"},
+            defaults={"run_id": "", "input_watermark": {}, "quality_status": "unknown"},
+        )
         self.client.insert("daily_security_reports", [row], column_names=list(DAILY_REPORT_COLUMNS))
 
     def insert_data_quality_metrics(self, metrics: Sequence[DataQualityMetric | dict[str, Any]]) -> None:
@@ -970,6 +1099,416 @@ class ClickHouseStorage:
         ]
         if rows:
             self.client.insert("data_quality_metrics", rows, column_names=list(DATA_QUALITY_COLUMNS))
+
+    def list_data_quality_metrics(
+        self,
+        *,
+        metric_date: date | None = None,
+        tenant_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        filters, parameters = _build_filters(
+            equals={"metric_date": metric_date, "tenant_id": tenant_id}
+        )
+        return self._select_dicts(
+            f"""
+            SELECT {_columns_sql(DATA_QUALITY_COLUMNS)}
+            FROM data_quality_metrics
+            {_where(filters)}
+            ORDER BY metric_date DESC, source_type ASC, created_at DESC
+            """,
+            parameters,
+        )
+
+    def insert_task_run(self, run: OperationsTaskRun | dict[str, Any]) -> None:
+        row = _row_from_payload(
+            _model_payload(run),
+            OPERATIONS_TASK_RUN_COLUMNS,
+            json_fields={"input_watermark", "output_refs"},
+            defaults={
+                "started_at": None,
+                "finished_at": None,
+                "input_watermark": {},
+                "output_refs": {},
+                "error_code": "",
+                "error_message": "",
+            },
+        )
+        self.client.insert("operations_task_runs", [row], column_names=list(OPERATIONS_TASK_RUN_COLUMNS))
+
+    def list_task_runs(
+        self,
+        *,
+        task_name: str | None = None,
+        tenant_id: str | None = None,
+        status: str | None = None,
+        target_date: date | None = None,
+        idempotency_key: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        filters, parameters = _build_filters(
+            equals={
+                "task_name": task_name,
+                "tenant_id": tenant_id,
+                "status": status,
+                "target_date": target_date,
+                "idempotency_key": idempotency_key,
+            }
+        )
+        where_sql = _where(filters)
+        parameters |= _pagination_parameters(limit=limit, offset=offset)
+        rows = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(OPERATIONS_TASK_RUN_COLUMNS)}
+            FROM operations_task_runs FINAL
+            {where_sql}
+            ORDER BY scheduled_at DESC, attempt DESC
+            LIMIT {{limit:UInt64}} OFFSET {{offset:UInt64}}
+            """,
+            parameters,
+        )
+        total = self._select_scalar(
+            f"SELECT count() FROM operations_task_runs FINAL {where_sql}",
+            parameters,
+            default=0,
+        )
+        return [_normalize_task_run_row(row) for row in rows], int(total or 0)
+
+    def get_task_run(self, run_id: str) -> dict[str, Any] | None:
+        rows = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(OPERATIONS_TASK_RUN_COLUMNS)}
+            FROM operations_task_runs FINAL
+            WHERE run_id = {{run_id:String}}
+            ORDER BY version DESC
+            LIMIT 1
+            """,
+            {"run_id": run_id},
+        )
+        return _normalize_task_run_row(rows[0]) if rows else None
+
+    def successful_task_run(self, idempotency_key: str) -> dict[str, Any] | None:
+        rows, _total = self.list_task_runs(
+            idempotency_key=idempotency_key,
+            status="succeeded",
+            limit=1,
+            offset=0,
+        )
+        return rows[0] if rows else None
+
+    def max_task_attempt(self, idempotency_key: str) -> int:
+        return int(
+            self._select_scalar(
+                """
+                SELECT max(attempt)
+                FROM operations_task_runs FINAL
+                WHERE idempotency_key = {idempotency_key:String}
+                """,
+                {"idempotency_key": idempotency_key},
+                default=0,
+            )
+            or 0
+        )
+
+    def dependency_succeeded(
+        self,
+        *,
+        task_name: str,
+        tenant_id: str,
+        target_date: date,
+    ) -> bool:
+        count = self._select_scalar(
+            """
+            SELECT count()
+            FROM operations_task_runs FINAL
+            WHERE task_name = {task_name:String}
+              AND tenant_id = {tenant_id:String}
+              AND target_date = {target_date:Date}
+              AND status = 'succeeded'
+            """,
+            {"task_name": task_name, "tenant_id": tenant_id, "target_date": target_date},
+            default=0,
+        )
+        return bool(count)
+
+    def data_watermark(self, *, tenant_id: str, target_date: date) -> dict[str, Any]:
+        rows = self._select_dicts(
+            """
+            SELECT
+                count() AS security_logs_count,
+                uniqExact(event_id) AS distinct_event_count,
+                min(event_time) AS first_event_time,
+                max(event_time) AS latest_event_time,
+                max(ingest_time) AS latest_ingest_time,
+                countIf(log_type = 'parse_error' OR has(risk_tags, 'parse_error')) AS parse_error_count
+            FROM security_logs
+            WHERE tenant_id = {tenant_id:String}
+              AND event_date = {target_date:Date}
+            """,
+            {"tenant_id": tenant_id, "target_date": target_date},
+        )
+        return rows[0] if rows else {
+            "security_logs_count": 0,
+            "distinct_event_count": 0,
+            "first_event_time": None,
+            "latest_event_time": None,
+            "latest_ingest_time": None,
+            "parse_error_count": 0,
+        }
+
+    def insert_acceptance_report(
+        self,
+        report: AcceptanceReport | dict[str, Any],
+        metrics: Sequence[AcceptanceMetric | dict[str, Any]],
+    ) -> None:
+        report_row = _row_from_payload(
+            _model_payload(report),
+            ACCEPTANCE_REPORT_COLUMNS,
+            json_fields={"summary"},
+            defaults={
+                "sample_from": None,
+                "sample_to": None,
+                "run_id": "",
+                "summary": {},
+            },
+        )
+        self.client.insert("acceptance_reports", [report_row], column_names=list(ACCEPTANCE_REPORT_COLUMNS))
+        metric_rows = [
+            _row_from_payload(
+                _model_payload(metric),
+                ACCEPTANCE_METRIC_COLUMNS,
+                json_fields={"details"},
+                defaults={"scenario_type": "overall", "details": {}},
+            )
+            for metric in metrics
+        ]
+        if metric_rows:
+            self.client.insert("acceptance_metrics", metric_rows, column_names=list(ACCEPTANCE_METRIC_COLUMNS))
+
+    def list_acceptance_reports(
+        self,
+        *,
+        tenant_id: str | None = None,
+        status: str | None = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        filters, parameters = _build_filters(equals={"tenant_id": tenant_id, "status": status})
+        where_sql = _where(filters)
+        parameters |= _pagination_parameters(limit=limit, offset=offset)
+        rows = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(ACCEPTANCE_REPORT_COLUMNS)}
+            FROM acceptance_reports FINAL
+            {where_sql}
+            ORDER BY created_at DESC
+            LIMIT {{limit:UInt64}} OFFSET {{offset:UInt64}}
+            """,
+            parameters,
+        )
+        total = self._select_scalar(
+            f"SELECT count() FROM acceptance_reports FINAL {where_sql}",
+            parameters,
+            default=0,
+        )
+        return [_normalize_acceptance_report_row(row) for row in rows], int(total or 0)
+
+    def get_acceptance_report(self, report_id: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        reports = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(ACCEPTANCE_REPORT_COLUMNS)}
+            FROM acceptance_reports FINAL
+            WHERE report_id = {{report_id:String}}
+            LIMIT 1
+            """,
+            {"report_id": report_id},
+        )
+        metrics = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(ACCEPTANCE_METRIC_COLUMNS)}
+            FROM acceptance_metrics
+            WHERE report_id = {{report_id:String}}
+            ORDER BY metric_name ASC, scenario_type ASC
+            """,
+            {"report_id": report_id},
+        )
+        report = _normalize_acceptance_report_row(reports[0]) if reports else None
+        return report, [_normalize_acceptance_metric_row(row) for row in metrics]
+
+    def acceptance_scenario_rows(
+        self,
+        *,
+        tenant_id: str = "default",
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        time_filters = ["tenant_id = {tenant_id:String}", "injected_label != ''"]
+        anomaly_filters = ["tenant_id = {tenant_id:String}"]
+        parameters: dict[str, Any] = {"tenant_id": tenant_id}
+        if start_time is not None:
+            time_filters.append("event_time >= {start_time:DateTime64(3)}")
+            anomaly_filters.append("event_time >= {start_time:DateTime64(3)}")
+            parameters["start_time"] = start_time
+        if end_time is not None:
+            time_filters.append("event_time <= {end_time:DateTime64(3)}")
+            anomaly_filters.append("event_time <= {end_time:DateTime64(3)}")
+            parameters["end_time"] = end_time
+        logs = self._select_dicts(
+            f"""
+            SELECT
+                event_id, event_time, ingest_time, source_type, user_id,
+                scenario_id, scenario_type, attack_chain_id, step_index, injected_label
+            FROM security_logs
+            {_where(time_filters)}
+            ORDER BY event_time ASC
+            """,
+            parameters,
+        )
+        anomalies = self._select_dicts(
+            f"""
+            SELECT
+                event_id, event_time, detect_time, risk_level, risk_score,
+                attack_type, reason_codes, scenario_id, scenario_type,
+                attack_chain_id, related_event_ids, scoring_version
+            FROM anomaly_events
+            {_where(anomaly_filters)}
+            ORDER BY detect_time ASC
+            """,
+            parameters,
+        )
+        judgements = self._select_dicts(
+            """
+            SELECT event_id, model_name, model_version, is_mock, created_at
+            FROM ai_judgements
+            ORDER BY created_at ASC
+            """
+        )
+        deliveries = self._select_dicts(
+            """
+            SELECT event_id, delivered_at
+            FROM notification_outbox FINAL
+            WHERE tenant_id = {tenant_id:String}
+              AND status = 'delivered'
+            """,
+            {"tenant_id": tenant_id},
+        )
+        return {"logs": logs, "anomalies": anomalies, "judgements": judgements, "deliveries": deliveries}
+
+    def latest_baseline_model_version(self, tenant_id: str = "default") -> str:
+        value = self._select_scalar(
+            """
+            SELECT argMax(model_version, created_at)
+            FROM ueba_user_baseline
+            WHERE tenant_id = {tenant_id:String}
+            """,
+            {"tenant_id": tenant_id},
+            default="",
+        )
+        return str(value or "")
+
+    def enqueue_notification(self, item: NotificationOutbox | dict[str, Any]) -> dict[str, Any]:
+        payload = _model_payload(item)
+        existing = self.get_notification_by_idempotency_key(str(payload["idempotency_key"]))
+        if existing:
+            return existing
+        row = _row_from_payload(
+            payload,
+            NOTIFICATION_OUTBOX_COLUMNS,
+            json_fields={"payload"},
+            defaults={"last_error": "", "delivered_at": None},
+        )
+        self.client.insert("notification_outbox", [row], column_names=list(NOTIFICATION_OUTBOX_COLUMNS))
+        return _normalize_notification_outbox_row(dict(payload))
+
+    def get_notification_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        rows = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(NOTIFICATION_OUTBOX_COLUMNS)}
+            FROM notification_outbox FINAL
+            WHERE idempotency_key = {{idempotency_key:String}}
+            ORDER BY version DESC
+            LIMIT 1
+            """,
+            {"idempotency_key": idempotency_key},
+        )
+        return _normalize_notification_outbox_row(rows[0]) if rows else None
+
+    def get_notification(self, outbox_id: str) -> dict[str, Any] | None:
+        rows = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(NOTIFICATION_OUTBOX_COLUMNS)}
+            FROM notification_outbox FINAL
+            WHERE outbox_id = {{outbox_id:String}}
+            ORDER BY version DESC
+            LIMIT 1
+            """,
+            {"outbox_id": outbox_id},
+        )
+        return _normalize_notification_outbox_row(rows[0]) if rows else None
+
+    def list_notifications(
+        self,
+        *,
+        tenant_id: str | None = None,
+        status: str | None = None,
+        due_before: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        filters, parameters = _build_filters(equals={"tenant_id": tenant_id, "status": status})
+        if due_before is not None:
+            filters.append("next_attempt_at <= {due_before:DateTime64(3)}")
+            parameters["due_before"] = due_before
+        where_sql = _where(filters)
+        parameters |= _pagination_parameters(limit=limit, offset=offset)
+        rows = self._select_dicts(
+            f"""
+            SELECT {_columns_sql(NOTIFICATION_OUTBOX_COLUMNS)}
+            FROM notification_outbox FINAL
+            {where_sql}
+            ORDER BY next_attempt_at ASC, created_at ASC
+            LIMIT {{limit:UInt64}} OFFSET {{offset:UInt64}}
+            """,
+            parameters,
+        )
+        total = self._select_scalar(
+            f"SELECT count() FROM notification_outbox FINAL {where_sql}",
+            parameters,
+            default=0,
+        )
+        return [_normalize_notification_outbox_row(row) for row in rows], int(total or 0)
+
+    def append_notification_state(self, item: NotificationOutbox | dict[str, Any]) -> None:
+        row = _row_from_payload(
+            _model_payload(item),
+            NOTIFICATION_OUTBOX_COLUMNS,
+            json_fields={"payload"},
+            defaults={"last_error": "", "delivered_at": None},
+        )
+        self.client.insert("notification_outbox", [row], column_names=list(NOTIFICATION_OUTBOX_COLUMNS))
+
+    def insert_notification_attempt(self, attempt: NotificationAttempt | dict[str, Any]) -> None:
+        row = _row_from_payload(
+            _model_payload(attempt),
+            NOTIFICATION_ATTEMPT_COLUMNS,
+            defaults={"response_status": None, "error_code": "", "error_message": "", "response_body": ""},
+        )
+        self.client.insert("notification_attempts", [row], column_names=list(NOTIFICATION_ATTEMPT_COLUMNS))
+
+    def list_notification_attempts(self, outbox_id: str) -> list[dict[str, Any]]:
+        return self._select_dicts(
+            f"""
+            SELECT {_columns_sql(NOTIFICATION_ATTEMPT_COLUMNS)}
+            FROM notification_attempts
+            WHERE outbox_id = {{outbox_id:String}}
+            ORDER BY attempt ASC, started_at ASC
+            """,
+            {"outbox_id": outbox_id},
+        )
+
+    def insert_parse_failure(self, failure: ParseFailure | dict[str, Any]) -> None:
+        row = _row_from_payload(_model_payload(failure), PARSE_FAILURE_COLUMNS)
+        self.client.insert("parser_failures", [row], column_names=list(PARSE_FAILURE_COLUMNS))
 
     def security_log_quality_stats(self, event_ids: Sequence[str]) -> dict[str, Any]:
         if not event_ids:
@@ -1242,6 +1781,16 @@ class ClickHouseStorage:
         )
         return [_normalize_daily_report_row(row) for row in rows], int(total or 0)
 
+    def get_daily_report(self, *, tenant_id: str, report_date: date) -> dict[str, Any] | None:
+        rows, _total = self.list_daily_reports(
+            tenant_id=tenant_id,
+            start_date=report_date,
+            end_date=report_date,
+            limit=1,
+            offset=0,
+        )
+        return rows[0] if rows else None
+
     def get_stats_overview(
         self,
         *,
@@ -1385,6 +1934,26 @@ def _build_anomaly_filters(
         filters.append("has(reason_codes, {reason_code:String})")
         parameters["reason_code"] = reason_code
     return filters, parameters
+
+
+def _resolve_user_risk_window(
+    window: str,
+    start_time: datetime | None,
+    end_time: datetime | None,
+) -> tuple[datetime | None, datetime | None, str]:
+    resolved_window = window if window in {"24h", "7d", "30d", "custom"} else "7d"
+    if resolved_window == "custom":
+        return start_time, end_time, resolved_window
+
+    reference_time = end_time or datetime.now(timezone.utc)
+    if reference_time.tzinfo is None:
+        reference_time = reference_time.replace(tzinfo=timezone.utc)
+    window_deltas = {
+        "24h": timedelta(hours=24),
+        "7d": timedelta(days=7),
+        "30d": timedelta(days=30),
+    }
+    return reference_time - window_deltas[resolved_window], reference_time, resolved_window
 
 
 def _build_baseline_filters(
@@ -1544,7 +2113,37 @@ def _normalize_daily_report_row(row: dict[str, Any]) -> dict[str, Any]:
         "ai_summary": row.get("ai_summary", ""),
         "recommendation": "\n".join(recommended_actions),
         "markdown": row.get("markdown_body", ""),
+        "run_id": row.get("run_id", ""),
+        "input_watermark": _json_loads(row.get("input_watermark"), default={}),
+        "quality_status": row.get("quality_status", "unknown"),
     }
+
+
+def _normalize_task_run_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    normalized["input_watermark"] = _json_loads(normalized.get("input_watermark"), default={})
+    normalized["output_refs"] = _json_loads(normalized.get("output_refs"), default={})
+    return normalized
+
+
+def _normalize_acceptance_report_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    normalized["ai_is_mock"] = bool(normalized.get("ai_is_mock"))
+    normalized["summary"] = _json_loads(normalized.get("summary"), default={})
+    return normalized
+
+
+def _normalize_acceptance_metric_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    normalized["passed"] = bool(normalized.get("passed"))
+    normalized["details"] = _json_loads(normalized.get("details"), default={})
+    return normalized
+
+
+def _normalize_notification_outbox_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    normalized["payload"] = _json_loads(normalized.get("payload"), default={})
+    return normalized
 
 
 # 把多行 baseline feature 合并成一个用户基线 profile
@@ -1665,6 +2264,9 @@ def _daily_report_payload(payload: dict[str, Any], *, tenant_id: str) -> dict[st
         "ai_summary": str(payload.get("ai_summary") or ""),
         "recommended_actions": recommended_actions,
         "markdown_body": str(payload.get("markdown") or payload.get("markdown_body") or ""),
+        "run_id": str(payload.get("run_id") or ""),
+        "input_watermark": payload.get("input_watermark") or {},
+        "quality_status": str(payload.get("quality_status") or "unknown"),
         "created_at": payload.get("created_at"),
     }
 
@@ -1782,7 +2384,20 @@ def _json_loads(value: Any, *, default: Any) -> Any:
 def _json_dumps(value: Any) -> str:
     if isinstance(value, str):
         return value
-    return json.dumps(value if value is not None else {}, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(
+        value if value is not None else {},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=_json_default,
+    )
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    return str(value)
 
 
 # 把 string 和 Iterable 转化为列表

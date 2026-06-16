@@ -180,7 +180,6 @@ class RuleEngine:
                         rule="同一src_ip在5分钟内登录失败超阈值",
                         reason_codes=["failed_login_spike"],
                         evidence={"src_ip": log.src_ip, "failed_count_5m": len(q)},
-                        risk_component_overrides={"rule_strength": 70},
                         baseline_deviations=context.baseline_deviations,
                         context=context,
                     )

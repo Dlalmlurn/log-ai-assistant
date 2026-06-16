@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.schemas import NormalizedLog
+from src.parser.url_normalization import normalize_resource_identifier
 
 SYSLOG_PREFIX_RE = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(?P<gateway>\S+)\s+vpnd:\s+(?P<body>.+)$"
@@ -208,6 +209,13 @@ def _build_normalized(parsed: dict[str, Any], raw_log: str, source_type: str) ->
         if value
     }
 
+    attrs = dict(parsed)
+    for candidate in (resource, parsed.get("object_id")):
+        normalized_resource = normalize_resource_identifier(candidate)
+        if normalized_resource:
+            attrs.update(normalized_resource)
+            break
+
     normalized = {
         "event_id": str(parsed.get("event_id") or uuid.uuid4()),
         "event_time": event_time,
@@ -244,7 +252,7 @@ def _build_normalized(parsed: dict[str, Any], raw_log: str, source_type: str) ->
         "attack_chain_id": parsed.get("attack_chain_id"),
         "step_index": _safe_int(parsed.get("step_index")),
         "injected_label": parsed.get("injected_label"),
-        "attrs": parsed,
+        "attrs": attrs,
     }
     return NormalizedLog.model_validate(normalized)
 

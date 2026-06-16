@@ -39,6 +39,45 @@ def test_preserves_upstream_event_id_and_source_type() -> None:
     assert out.action == "api_call"
 
 
+def test_resource_url_template_and_fingerprint_are_added_to_attrs() -> None:
+    first = normalize_raw_record(
+        {
+            "event_id": "evt-url-1",
+            "timestamp": "2026-04-01 09:40:16",
+            "tenant_id": "default",
+            "source_type": "api",
+            "log_type": "api_access",
+            "user_id": "alice",
+            "src_ip": "10.10.1.8",
+            "action": "api_call",
+            "resource": "/api/users/123/detail?token=secret&page=1",
+            "result": "success",
+        },
+        source_type_hint="api",
+    )
+    second = normalize_raw_record(
+        {
+            "event_id": "evt-url-2",
+            "timestamp": "2026-04-01 09:40:17",
+            "tenant_id": "default",
+            "source_type": "api",
+            "log_type": "api_access",
+            "user_id": "alice",
+            "src_ip": "10.10.1.8",
+            "action": "api_call",
+            "resource": "/api/users/456/detail?page=2&access_token=secret",
+            "result": "success",
+        },
+        source_type_hint="api",
+    )
+
+    assert first.resource == "/api/users/123/detail?token=secret&page=1"
+    assert first.attrs["url_template"] == "/api/users/{id}/detail?page={value}"
+    assert "token" not in first.attrs["url_template"]
+    assert first.attrs["resource_normalization_version"] == "resource-normalization-v1"
+    assert first.attrs["resource_fingerprint"] == second.attrs["resource_fingerprint"]
+
+
 def test_parse_syslog_line() -> None:
     line = (
         '2026-04-01 09:40:16 vpn-gw-bj01 vpnd: event=LOGIN_FAIL user=admin dept=IT部 '

@@ -135,6 +135,10 @@ generated -> raw_logs -> parsed_logs -> ClickHouse insert -> security_logs
 | 攻击检出率 | 至少产生一个 `AnomalyEvent` 的攻击链占比。 |
 | 高危检出率 | 至少产生一个 high/critical 事件的高危攻击链占比。 |
 | 端到端可追踪率 | 能从 manifest 追踪到 `security_logs` 和 `anomaly_events` 的攻击链占比。 |
+| High-risk Precision | high/critical 异常中能关联到注入攻击事件或攻击链的占比。 |
+| 攻击事件 Recall | 注入攻击事件中被异常 `related_event_ids` 关联覆盖的占比。 |
+| 攻击类型混淆矩阵 | 按 `injected_label` 推导的期望攻击类型与异常 `attack_type` 的交叉计数。 |
+| 风险等级准确率 | 期望风险等级与异常 `risk_level` 的匹配率；期望 high 允许 high 或 critical。 |
 | AI 覆盖率 | 符合 AI 候选条件且形成研判记录的异常占比，真实与 mock 必须分开统计。 |
 | 检测延迟 | 原始事件时间到异常 `detect_time` 的 p50、p95 和最大值。 |
 | 通知延迟 | 异常 `detect_time` 到成功投递时间的 p50、p95 和最大值。 |

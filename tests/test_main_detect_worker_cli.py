@@ -34,6 +34,7 @@ def test_detect_worker_once_command_runs_worker(monkeypatch, capsys) -> None:
             "15",
             "--interval-seconds",
             "5",
+            "--recover-state-on-start",
         ]
     )
     args.func(args)
@@ -42,5 +43,6 @@ def test_detect_worker_once_command_runs_worker(monkeypatch, capsys) -> None:
         "storage": "storage",
         "lookback_minutes": 15,
         "batch_size": 25,
+        "recover_state_on_start": True,
     }
     assert "logs_read=3" in capsys.readouterr().out
